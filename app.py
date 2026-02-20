@@ -11,55 +11,54 @@ st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 # ----------------------------
 DEFAULT_ASSETS = pd.DataFrame(
     [
-        {"account": "HSBC", "balance": 0.0},
-        {"account": "Lloyds", "balance": 0.0},
-        {"account": "Apple Savings", "balance": 0.0},
-        {"account": "Cash", "balance": 0.0},
+        {"account": "HSBC", "balance": "0"},
+        {"account": "Lloyds", "balance": "0"},
+        {"account": "Apple Savings", "balance": "0"},
+        {"account": "Cash", "balance": "0"},
     ]
 )
 
 DEFAULT_CARDS = pd.DataFrame(
     [
-        {"card": "Amex", "balance": 0.0, "due_this_cycle": 0.0, "is_due": False},
-        {"card": "Apple", "balance": 0.0, "due_this_cycle": 0.0, "is_due": False},
+        {"card": "Amex", "balance": "0", "due_this_cycle": "0", "is_due": False},
+        {"card": "Apple", "balance": "0", "due_this_cycle": "0", "is_due": False},
     ]
 )
 
 DEFAULT_FIXED = pd.DataFrame(
     [
-        {"item": "Savings", "amount": 5000.00, "due": True},
-        {"item": "RAC", "amount": 300.00, "due": True},
-        {"item": "Car Loan", "amount": 480.37, "due": True},
-        {"item": "Marchon", "amount": 133.10, "due": True},
-        {"item": "Utilities", "amount": 425.00, "due": True},
-        {"item": "Eric Vodafone", "amount": 38.00, "due": True},
-        {"item": "Eric Haircut", "amount": 35.00, "due": True},
-        {"item": "Eric iphone", "amount": 35.11, "due": True},
-        {"item": "Cleaning", "amount": 72.00, "due": True},
-        {"item": "Gigi Vodafone", "amount": 38.00, "due": True},
-        {"item": "Gigi Gym", "amount": 79.00, "due": True},
-        {"item": "Caroline Circuits", "amount": 35.00, "due": True},
-        {"item": "Gigi Charity", "amount": 12.00, "due": True},
-        {"item": "G+ E Contacts", "amount": 95.00, "due": True},
+        {"item": "Savings", "amount": "5000.00", "due": True},
+        {"item": "RAC", "amount": "300.00", "due": True},
+        {"item": "Car Loan", "amount": "480.37", "due": True},
+        {"item": "Marchon", "amount": "133.10", "due": True},
+        {"item": "Utilities", "amount": "425.00", "due": True},
+        {"item": "Eric Vodafone", "amount": "38.00", "due": True},
+        {"item": "Eric Haircut", "amount": "35.00", "due": True},
+        {"item": "Eric iphone", "amount": "35.11", "due": True},
+        {"item": "Cleaning", "amount": "72.00", "due": True},
+        {"item": "Gigi Vodafone", "amount": "38.00", "due": True},
+        {"item": "Gigi Gym", "amount": "79.00", "due": True},
+        {"item": "Caroline Circuits", "amount": "35.00", "due": True},
+        {"item": "Gigi Charity", "amount": "12.00", "due": True},
+        {"item": "G+ E Contacts", "amount": "95.00", "due": True},
     ]
 )
 
 # “Reimbursement pending” with 3 rows
 DEFAULT_REIMB = pd.DataFrame(
     [
-        {"source": "Eric Work", "amount": 0.0, "include_this_month": True},
-        {"source": "Gigi Work", "amount": 0.0, "include_this_month": True},
-        {"source": "Misc", "amount": 0.0, "include_this_month": False},
+        {"source": "Eric Work", "amount": "0", "include_this_month": True},
+        {"source": "Gigi Work", "amount": "0", "include_this_month": True},
+        {"source": "Misc", "amount": "0", "include_this_month": False},
     ]
 )
 
 DEFAULT_PAY = pd.DataFrame(
     [
-        {"person": "Eric", "monthly_pay": 6100.00},
-        {"person": "Gigi", "monthly_pay": 6100.00},
+        {"person": "Eric", "monthly_pay": "0"},
+        {"person": "Gigi", "monthly_pay": "0"},
     ]
 )
-
 
 # ----------------------------
 # Helpers: in-session "database"
@@ -76,10 +75,8 @@ def init_state():
     if "pay" not in st.session_state:
         st.session_state.pay = DEFAULT_PAY.copy()
 
-
 def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
-
 
 def make_backup_zip() -> bytes:
     """Create an in-memory ZIP containing all tables as CSV."""
@@ -92,7 +89,6 @@ def make_backup_zip() -> bytes:
         z.writestr("pay_cycle.csv", df_to_csv_bytes(st.session_state.pay))
     buf.seek(0)
     return buf.read()
-
 
 def load_backup_zip(zip_bytes: bytes):
     """Load CSVs from a ZIP into session_state. Missing files fall back to defaults."""
@@ -110,13 +106,33 @@ def load_backup_zip(zip_bytes: bytes):
         st.session_state.reimb = read_df("reimbursements.csv", DEFAULT_REIMB)
         st.session_state.pay = read_df("pay_cycle.csv", DEFAULT_PAY)
 
-
 def coerce_numeric(df: pd.DataFrame, cols):
+    """
+    Converts text inputs to numbers safely.
+    Accepts: 123.45, 123,45, £123.45, 1,234.56
+    """
+    def parse(v):
+        if v is None:
+            return 0.0
+        s = str(v).strip()
+        if s == "" or s.lower() in {"nan", "none"}:
+            return 0.0
+        s = s.replace("£", "").replace(" ", "")
+        if "," in s and "." in s:
+            s = s.replace(",", "")
+        else:
+            s = s.replace(",", ".")
+        s = re.sub(r"[^0-9\.\-]", "", s)
+        try:
+            return float(s)
+        except:
+            return 0.0
+
+    import re
     for c in cols:
         if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+            df[c] = df[c].apply(parse)
     return df
-
 
 # ----------------------------
 # UI: Save / Load controls
@@ -157,33 +173,29 @@ with st.sidebar:
 # ----------------------------
 st.title("Stabler Family Finances")
 
-# Clean types (helps with input issues like '.' sometimes)
-st.session_state.assets = coerce_numeric(st.session_state.assets, ["balance"])
-st.session_state.cards = coerce_numeric(st.session_state.cards, ["balance", "due_this_cycle"])
-st.session_state.fixed = coerce_numeric(st.session_state.fixed, ["amount"])
-st.session_state.reimb = coerce_numeric(st.session_state.reimb, ["amount"])
-st.session_state.pay = coerce_numeric(st.session_state.pay, ["monthly_pay"])
+# Convert text -> numeric for calculations
+assets_num = coerce_numeric(st.session_state.assets.copy(), ["balance"])
+cards_num = coerce_numeric(st.session_state.cards.copy(), ["balance", "due_this_cycle"])
+fixed_num = coerce_numeric(st.session_state.fixed.copy(), ["amount"])
+reimb_num = coerce_numeric(st.session_state.reimb.copy(), ["amount"])
 
-assets_total = float(st.session_state.assets["balance"].sum()) if "balance" in st.session_state.assets else 0.0
-card_bal_total = float(st.session_state.cards["balance"].sum()) if "balance" in st.session_state.cards else 0.0
-card_due_total = float(
-    st.session_state.cards.loc[st.session_state.cards.get("is_due", False) == True, "due_this_cycle"].sum()
-) if "due_this_cycle" in st.session_state.cards else 0.0
+assets_total = float(assets_num["balance"].sum()) if "balance" in assets_num else 0.0
+card_bal_total = float(cards_num["balance"].sum()) if "balance" in cards_num else 0.0
 
-fixed_total = float(st.session_state.fixed["amount"].sum()) if "amount" in st.session_state.fixed else 0.0
-fixed_due_total = float(
-    st.session_state.fixed.loc[st.session_state.fixed.get("due", False) == True, "amount"].sum()
-) if "amount" in st.session_state.fixed else 0.0
+if "is_due" in cards_num.columns and "due_this_cycle" in cards_num.columns:
+    card_due_total = float(cards_num.loc[cards_num["is_due"] == True, "due_this_cycle"].sum())
+else:
+    card_due_total = 0.0
 
-reimb_included_total = float(
-    st.session_state.reimb.loc[st.session_state.reimb.get("include_this_month", False) == True, "amount"].sum()
-) if "amount" in st.session_state.reimb else 0.0
+if "due" in fixed_num.columns and "amount" in fixed_num.columns:
+    fixed_due_total = float(fixed_num.loc[fixed_num["due"] == True, "amount"].sum())
+else:
+    fixed_due_total = 0.0
 
 net_cash = assets_total - card_bal_total
-total_spend_rest_of_month = fixed_due_total + card_due_total  # simple + consistent
+total_spend_rest_of_month = fixed_due_total + card_due_total
 
-
-# ---- Top KPI row (you asked to move this to top)
+# ---- Top KPI row
 k1, k2, k3 = st.columns(3)
 k1.metric("Net Cash", f"£{net_cash:,.2f}")
 k2.metric("Total Credit Card Bill Due", f"£{card_due_total:,.2f}")
@@ -191,7 +203,7 @@ k3.metric("Total Spend Rest of Month", f"£{total_spend_rest_of_month:,.2f}")
 
 st.markdown("---")
 
-# ---- Top tables row: Assets / Credit Cards / Reimbursements Pending
+# ---- Tables row
 c1, c2, c3 = st.columns(3)
 
 with c1:
@@ -202,7 +214,7 @@ with c1:
         use_container_width=True,
         column_config={
             "account": st.column_config.TextColumn("account"),
-            "balance": st.column_config.NumberColumn("Balance", format="£%.2f", step=1.0),
+            "balance": st.column_config.TextColumn("Balance (£)"),
         },
         key="assets_editor",
     )
@@ -215,8 +227,8 @@ with c2:
         use_container_width=True,
         column_config={
             "card": st.column_config.TextColumn("card"),
-            "balance": st.column_config.NumberColumn("Balance", format="£%.2f", step=1.0),
-            "due_this_cycle": st.column_config.NumberColumn("Due this cycle", format="£%.2f", step=1.0),
+            "balance": st.column_config.TextColumn("Balance (£)"),
+            "due_this_cycle": st.column_config.TextColumn("Due this cycle (£)"),
             "is_due": st.column_config.CheckboxColumn("Due?"),
         },
         key="cards_editor",
@@ -224,21 +236,20 @@ with c2:
 
 with c3:
     st.subheader("Reimbursement Pending")
-    st.caption("Track work reimbursements + misc items. Toggle Include if you want it counted this month.")
     st.session_state.reimb = st.data_editor(
         st.session_state.reimb,
-        num_rows="dynamic",
+        num_rows="fixed",
         use_container_width=True,
         column_config={
             "source": st.column_config.TextColumn("Source"),
-            "amount": st.column_config.NumberColumn("Amount", format="£%.2f", step=1.0),
+            "amount": st.column_config.TextColumn("Amount (£)"),
             "include_this_month": st.column_config.CheckboxColumn("Include?"),
         },
         key="reimb_editor",
     )
 
-# ---- Second area: Monthly Fixed + Pay Cycle (optional)
 st.markdown("---")
+
 left, right = st.columns([2, 1])
 
 with left:
@@ -249,7 +260,7 @@ with left:
         use_container_width=True,
         column_config={
             "item": st.column_config.TextColumn("item"),
-            "amount": st.column_config.NumberColumn("Amount", format="£%.2f", step=1.0),
+            "amount": st.column_config.TextColumn("Amount (£)"),
             "due": st.column_config.CheckboxColumn("Due?"),
         },
         key="fixed_editor",
@@ -264,17 +275,7 @@ with right:
         use_container_width=True,
         column_config={
             "person": st.column_config.TextColumn("Person"),
-            "monthly_pay": st.column_config.NumberColumn("Monthly pay", format="£%.2f", step=1.0),
+            "monthly_pay": st.column_config.TextColumn("Monthly pay (£)"),
         },
         key="pay_editor",
     )
-
-st.markdown("---")
-st.subheader("Summary")
-s1, s2, s3 = st.columns(3)
-s1.write(f"**Assets total:** £{assets_total:,.2f}")
-s1.write(f"**Card balances:** £{card_bal_total:,.2f}")
-s2.write(f"**Fixed monthly total:** £{fixed_total:,.2f}")
-s2.write(f"**Fixed due:** £{fixed_due_total:,.2f}")
-s3.write(f"**Cards due:** £{card_due_total:,.2f}")
-s3.write(f"**Reimbursements included:** £{reimb_included_total:,.2f}")
