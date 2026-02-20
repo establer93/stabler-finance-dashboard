@@ -1,47 +1,23 @@
 import streamlit as st
-
-st.title("Secret Debug")
-
-SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
-SUPABASE_KEY = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "")
-
-st.write("URL exists:", SUPABASE_URL != "")
-st.write("URL starts with https:", SUPABASE_URL.startswith("https"))
-
-st.write("Key exists:", SUPABASE_KEY != "")
-st.write("Key prefix:", SUPABASE_KEY[:10])
-st.write("Key length:", len(SUPABASE_KEY))import streamlit as st
 import pandas as pd
 from supabase import create_client
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 st.title("Stabler Family Finances")
 
-# -----------------------------
-# Supabase Connection
-# -----------------------------
+# Supabase connection using ANON key
 SUPABASE_URL = st.secrets.get("SUPABASE_URL")
-SUPABASE_KEY = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_KEY = st.secrets.get("SUPABASE_ANON_KEY")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    st.error("Supabase secrets not found. Add them in Streamlit → Settings → Secrets.")
+    st.error("Supabase secrets not set correctly.")
     st.stop()
 
-try:
-    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
-except Exception as e:
-    st.error("Supabase connection failed. Check your secret key.")
-    st.stop()
+sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# -----------------------------
-# Helper functions
-# -----------------------------
 def fetch(table):
-    try:
-        res = sb.table(table).select("*").execute()
-        return pd.DataFrame(res.data if res.data else [])
-    except:
-        return pd.DataFrame()
+    res = sb.table(table).select("*").execute()
+    return pd.DataFrame(res.data if res.data else [])
 
 def save(table, df):
     if not df.empty:
@@ -53,17 +29,11 @@ def money(x):
     except:
         return "£0.00"
 
-# -----------------------------
-# Load Data
-# -----------------------------
 assets = fetch("assets")
 cards = fetch("credit_cards")
 reimbursements = fetch("reimbursements")
 fixed = fetch("fixed_costs")
 
-# -----------------------------
-# Metrics
-# -----------------------------
 assets_total = assets["balance"].sum() if "balance" in assets else 0
 cards_balance = cards["balance"].sum() if "balance" in cards else 0
 cards_due = cards["due"].sum() if "due" in cards else 0
@@ -77,9 +47,6 @@ m3.metric("Total Spend Rest of Month", money(cards_due))
 
 st.divider()
 
-# -----------------------------
-# Tables
-# -----------------------------
 col1, col2, col3 = st.columns(3)
 
 with col1:
