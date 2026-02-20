@@ -1,4 +1,2 @@
 streamlit
 pandas
-plotly
-supabase==2.6.0
