@@ -9,21 +9,44 @@ st.title("Stabler Family Finances")
 FILES = {
     "assets": ("assets.csv", ["account", "balance"]),
     "cards": ("credit_cards.csv", ["card", "balance", "due", "is_due"]),
-    "pending": ("expense_pending.csv", ["item", "amount", "include"]),
+    "reimb": ("reimbursement_pending.csv", ["item", "amount", "include"]),
     "fixed": ("fixed_costs.csv", ["item", "amount", "is_due"]),
 }
+
+DEFAULT_REIMB_ROWS = pd.DataFrame(
+    [
+        {"item": "Eric Work", "amount": "0", "include": True},
+        {"item": "Gigi Work", "amount": "0", "include": True},
+        {"item": "Misc", "amount": "0", "include": False},
+    ]
+)
 
 # -------------------------
 # Helpers
 # -------------------------
-def ensure_file(filename: str, cols: list[str]) -> None:
+def ensure_file(filename: str, cols: list[str], default_df: pd.DataFrame | None = None) -> None:
     path = Path(filename)
-    if not path.exists():
+    if path.exists():
+        return
+    if default_df is not None:
+        # Ensure correct column order
+        out = default_df.copy()
+        for c in cols:
+            if c not in out.columns:
+                out[c] = None
+        out = out[cols]
+        out.to_csv(path, index=False)
+    else:
         pd.DataFrame(columns=cols).to_csv(path, index=False)
 
 def load_df(key: str) -> pd.DataFrame:
     filename, cols = FILES[key]
-    ensure_file(filename, cols)
+
+    if key == "reimb":
+        ensure_file(filename, cols, DEFAULT_REIMB_ROWS)
+    else:
+        ensure_file(filename, cols)
+
     df = pd.read_csv(filename)
 
     for c in cols:
@@ -50,13 +73,7 @@ def to_bool(series: pd.Series) -> pd.Series:
 
 def parse_money_cell(v) -> float:
     """
-    Accepts:
-      123.45
-      123,45
-      £123.45
-      1,234.56
-      1.234,56 (we'll best-effort)
-    Returns float, default 0.0 if blank/invalid.
+    Accepts: 123.45, 123,45, £123.45, 1,234.56, etc.
     """
     if v is None:
         return 0.0
@@ -64,17 +81,13 @@ def parse_money_cell(v) -> float:
     if s == "" or s.lower() in {"nan", "none"}:
         return 0.0
 
-    # Remove currency and spaces
     s = s.replace("£", "").replace(" ", "")
 
-    # If both ',' and '.' exist, assume ',' are thousands separators -> remove commas
     if "," in s and "." in s:
         s = s.replace(",", "")
     else:
-        # Otherwise treat comma as decimal separator
         s = s.replace(",", ".")
 
-    # Keep only digits, minus, dot
     s = re.sub(r"[^0-9\.\-]", "", s)
 
     try:
@@ -90,24 +103,27 @@ def normalize_money_column(df: pd.DataFrame, col: str) -> pd.Series:
 # -------------------------
 assets = load_df("assets")
 cards = load_df("cards")
-pending = load_df("pending")
+reimb = load_df("reimb")
 fixed = load_df("fixed")
 
 # Ensure boolean cols behave
-if "is_due" in cards.columns:
-    cards["is_due"] = to_bool(cards["is_due"])
-if "include" in pending.columns:
-    pending["include"] = to_bool(pending["include"])
-if "is_due" in fixed.columns:
-    fixed["is_due"] = to_bool(fixed["is_due"])
+cards["is_due"] = to_bool(cards["is_due"]) if "is_due" in cards.columns else False
+reimb["include"] = to_bool(reimb["include"]) if "include" in reimb.columns else False
+fixed["is_due"] = to_bool(fixed["is_due"]) if "is_due" in fixed.columns else False
 
-# Convert money cols to strings for editing (so iPad can type '.' freely)
-for df, col in [(assets, "balance"), (cards, "balance"), (cards, "due"), (pending, "amount"), (fixed, "amount")]:
+# Convert money cols to strings for editing (iPad-safe)
+for df, col in [
+    (assets, "balance"),
+    (cards, "balance"),
+    (cards, "due"),
+    (reimb, "amount"),
+    (fixed, "amount"),
+]:
     if col in df.columns:
         df[col] = df[col].fillna("").astype(str)
 
 # -------------------------
-# TOP ROW: Assets | Credit Cards | Expense Pending
+# TOP ROW: Assets | Credit Cards | Reimbursement Pending
 # -------------------------
 col1, col2, col3 = st.columns(3)
 
@@ -123,7 +139,6 @@ with col1:
         },
     )
 
-    # Normalize + save as numeric strings (clean CSV)
     assets_out = assets_edit.copy()
     assets_out["balance"] = normalize_money_column(assets_out, "balance")
     save_df("assets", assets_out)
@@ -156,12 +171,12 @@ with col2:
     st.caption(f"Total Card Balances: {money(cards_total_balance)} · Total Bills Due: {money(cards_bill_due_total)}")
 
 with col3:
-    st.subheader("Expense Pending")
-    st.caption("One-off expenses to include in 'rest of month' spend.")
-    pending_edit = st.data_editor(
-        pending,
-        key="pending_editor",
-        num_rows="dynamic",
+    st.subheader("Reimbursement Pending")
+    st.caption("Track work reimbursements + misc items. Toggle Include if you want it counted this month.")
+    reimb_edit = st.data_editor(
+        reimb,
+        key="reimb_editor",
+        num_rows="fixed",  # keep exactly 3 rows unless you edit the CSV
         use_container_width=True,
         column_config={
             "amount": st.column_config.TextColumn("Amount (£)", help="Type e.g. 123.45"),
@@ -169,26 +184,25 @@ with col3:
         },
     )
 
-    pending_out = pending_edit.copy()
-    pending_out["include"] = to_bool(pending_out["include"])
-    pending_out["amount"] = normalize_money_column(pending_out, "amount")
-    save_df("pending", pending_out)
+    reimb_out = reimb_edit.copy()
+    reimb_out["include"] = to_bool(reimb_out["include"])
+    reimb_out["amount"] = normalize_money_column(reimb_out, "amount")
+    save_df("reimb", reimb_out)
 
-    pending_total = float(pending_out.loc[pending_out["include"] == True, "amount"].sum()) if not pending_out.empty else 0.0
-    st.caption(f"Included Pending: {money(pending_total)}")
+    reimb_total = float(reimb_out.loc[reimb_out["include"] == True, "amount"].sum()) if not reimb_out.empty else 0.0
+    st.caption(f"Included Reimbursements: {money(reimb_total)}")
 
 st.divider()
 
 # -------------------------
 # SECOND ROW METRICS
 # -------------------------
-# Load fixed due from saved/normalized fixed_out below; for now compute after fixed editor.
 net_cash = assets_total - cards_total_balance
 cards_due_now = float(cards_out.loc[cards_out["is_due"] == True, "due"].sum()) if not cards_out.empty else 0.0
 
-# Placeholder until we compute fixed_due_total
+# Fixed due will be calculated after the editor below
 fixed_due_total = 0.0
-total_spend_rest_month = fixed_due_total + pending_total + cards_due_now
+total_spend_rest_month = fixed_due_total + reimb_total + cards_due_now
 
 m1, m2, m3 = st.columns(3)
 m1.metric("Net Cash", money(net_cash))
@@ -220,8 +234,7 @@ with st.expander("Monthly Fixed (Used in totals)", expanded=True):
     fixed_total = float(fixed_out["amount"].sum()) if not fixed_out.empty else 0.0
     fixed_due_total = float(fixed_out.loc[fixed_out["is_due"] == True, "amount"].sum()) if not fixed_out.empty else 0.0
 
-    # Recompute spend rest of month with live fixed
-    total_spend_rest_month_live = fixed_due_total + pending_total + cards_due_now
+    total_spend_rest_month_live = fixed_due_total + reimb_total + cards_due_now
 
     st.caption(f"Total Monthly Fixed: {money(fixed_total)} · Fixed Due This Month: {money(fixed_due_total)}")
-    st.caption(f"Spend Rest of Month (recalc): {money(total_spend_rest_month_live)}")
+    st.caption(f"Total Spend Rest of Month (recalc): {money(total_spend_rest_month_live)}")
