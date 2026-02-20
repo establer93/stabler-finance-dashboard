@@ -2,37 +2,116 @@ import streamlit as st
 import pandas as pd
 from pathlib import Path
 
-st.set_page_config(layout="wide")
+st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 st.title("Stabler Family Finances")
 
-DATA = Path("credit_cards.csv")
+FILES = {
+    "assets": ("assets.csv", ["account", "balance"]),
+    "liabilities": ("liabilities.csv", ["account", "balance"]),
+    "cards": ("credit_cards.csv", ["card", "balance", "due", "is_due"]),
+    "fixed": ("fixed_costs.csv", ["item", "amount", "is_due"]),
+}
 
-def load_cards():
+def load_df(key):
+    filename, cols = FILES[key]
+    path = Path(filename)
+    if not path.exists():
+        return pd.DataFrame(columns=cols)
+    df = pd.read_csv(path)
+    for c in cols:
+        if c not in df.columns:
+            df[c] = None
+    return df[cols].copy()
+
+def save_df(key, df):
+    filename, cols = FILES[key]
+    out = df.copy()[cols]
+    out.to_csv(filename, index=False)
+
+def money(x):
     try:
-        return pd.read_csv(DATA)
+        return f"£{float(x):,.2f}"
     except:
-        return pd.DataFrame(columns=["card","balance","due","is_due"])
+        return "£0.00"
 
-def save_cards(df):
-    df.to_csv(DATA, index=False)
+# Load
+assets = load_df("assets")
+liabilities = load_df("liabilities")
+cards = load_df("cards")
+fixed = load_df("fixed")
 
-df = load_cards()
+# Clean types
+for df, col in [(assets, "balance"), (liabilities, "balance"), (cards, "balance"), (cards, "due"), (fixed, "amount")]:
+    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
-st.subheader("Credit Cards")
+for df, col in [(cards, "is_due"), (fixed, "is_due")]:
+    df[col] = df[col].fillna(False).astype(bool)
 
-edited = st.data_editor(
-    df,
-    num_rows="dynamic",
-    use_container_width=True
-)
+# --- Layout: top row (3 blocks) ---
+c1, c2, c3 = st.columns(3)
 
-save_cards(edited)
+with c1:
+    st.subheader("Assets")
+    assets_edit = st.data_editor(
+        assets, num_rows="dynamic", use_container_width=True,
+        column_config={"balance": st.column_config.NumberColumn("Balance", format="£%.2f")}
+    )
+    save_df("assets", assets_edit)
+    assets_total = assets_edit["balance"].sum()
 
-total_balance = edited["balance"].sum() if not edited.empty else 0
-due_balance = edited.loc[edited["is_due"] == True, "balance"].sum() if not edited.empty else 0
-not_due_balance = total_balance - due_balance
+with c2:
+    st.subheader("Liabilities")
+    liab_edit = st.data_editor(
+        liabilities, num_rows="dynamic", use_container_width=True,
+        column_config={"balance": st.column_config.NumberColumn("Balance", format="£%.2f")}
+    )
+    save_df("liabilities", liab_edit)
+    liab_total = liab_edit["balance"].sum()
 
-col1, col2, col3 = st.columns(3)
-col1.metric("Total Card Balance", f"£{total_balance:,.2f}")
-col2.metric("Due Now", f"£{due_balance:,.2f}")
-col3.metric("Not Due", f"£{not_due_balance:,.2f}")
+with c3:
+    st.subheader("Credit Cards")
+    cards_edit = st.data_editor(
+        cards, num_rows="dynamic", use_container_width=True,
+        column_config={
+            "balance": st.column_config.NumberColumn("Balance", format="£%.2f"),
+            "due": st.column_config.NumberColumn("Due this cycle", format="£%.2f"),
+            "is_due": st.column_config.CheckboxColumn("Due?")
+        }
+    )
+    save_df("cards", cards_edit)
+    cards_total = cards_edit["balance"].sum()
+    cards_due = cards_edit.loc[cards_edit["is_due"] == True, "due"].sum() if not cards_edit.empty else 0.0
+
+st.divider()
+
+# --- Second row: Fixed + Summary ---
+left, right = st.columns([1.3, 0.7])
+
+with left:
+    st.subheader("Monthly Fixed")
+    fixed_edit = st.data_editor(
+        fixed, num_rows="dynamic", use_container_width=True,
+        column_config={
+            "amount": st.column_config.NumberColumn("Amount", format="£%.2f"),
+            "is_due": st.column_config.CheckboxColumn("Due?")
+        }
+    )
+    save_df("fixed", fixed_edit)
+    fixed_total = fixed_edit["amount"].sum()
+    fixed_due = fixed_edit.loc[fixed_edit["is_due"] == True, "amount"].sum() if not fixed_edit.empty else 0.0
+
+with right:
+    st.subheader("Summary")
+    due_now = float(cards_due) + float(fixed_due)
+    net_position = float(assets_total) - float(liab_total) - float(cards_total)
+
+    s1, s2 = st.columns(2)
+    s1.metric("Due now", money(due_now))
+    s2.metric("Net position", money(net_position))
+
+    st.markdown("**Breakdown**")
+    st.write(f"Cards due: {money(cards_due)}")
+    st.write(f"Fixed due: {money(fixed_due)}")
+    st.write(f"Assets total: {money(assets_total)}")
+    st.write(f"Liabilities total: {money(liab_total)}")
+    st.write(f"Card balances: {money(cards_total)}")
