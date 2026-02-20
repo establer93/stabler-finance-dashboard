@@ -1,7 +1,15 @@
-item,amount,is_due
-RAC,0,TRUE
-Car Loan,0,TRUE
-Utilities,0,TRUE
-Gym,0,TRUE
-Subscriptions,0,TRUE
-Other,0,FALSE
+item,amount,monthly,due_now
+Savings,5000.00,TRUE,TRUE
+RAC,300.00,TRUE,TRUE
+Car Loan,480.37,TRUE,TRUE
+Marchon,133.10,TRUE,TRUE
+Utilities,425.00,TRUE,TRUE
+Eric Vodafone,38.00,TRUE,TRUE
+Eric Haircut,35.00,TRUE,TRUE
+Eric iphone,35.11,TRUE,TRUE
+Cleaning,72.00,TRUE,TRUE
+Gigi Vodafone,38.00,TRUE,TRUE
+Gigi Gym,79.00,TRUE,TRUE
+Caroline Circuits,35.00,TRUE,TRUE
+Gigi Charity,12.00,TRUE,TRUE
+G+ E Contacts,95.00,TRUE,TRUE
