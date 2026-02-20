@@ -1,4 +1,26 @@
 import streamlit as st
+from supabase import create_client
+
+st.set_page_config(page_title="Stabler Family Finances", layout="wide")
+st.title("Supabase Debug")
+
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
+SUPABASE_KEY = st.secrets.get("SUPABASE_ANON_KEY", "")
+
+st.write("URL exists:", bool(SUPABASE_URL))
+st.write("URL starts with https:", SUPABASE_URL.startswith("https://"))
+st.write("Key exists:", bool(SUPABASE_KEY))
+st.write("Key prefix:", SUPABASE_KEY[:15])
+st.write("Key length:", len(SUPABASE_KEY))
+
+try:
+    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+    # lightweight call:
+    res = sb.table("assets").select("*").limit(1).execute()
+    st.success("✅ Connected to Supabase and can read the assets table.")
+except Exception as e:
+    st.error("❌ Connection failed")
+    st.code(str(e))import streamlit as st
 import pandas as pd
 from supabase import create_client
 
