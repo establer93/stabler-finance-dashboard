@@ -12,16 +12,28 @@ FILES = {
     "fixed": ("fixed_costs.csv", ["item", "amount", "is_due"]),
 }
 
-def load_df(key: str) -> pd.DataFrame:
-    filename, cols = FILES[key]
+def ensure_file(filename: str, cols: list[str]) -> None:
+    """Create the file with just headers if it doesn't exist."""
     path = Path(filename)
     if not path.exists():
-        return pd.DataFrame(columns=cols)
-    df = pd.read_csv(path)
+        pd.DataFrame(columns=cols).to_csv(path, index=False)
+
+def load_df(key: str) -> pd.DataFrame:
+    filename, cols = FILES[key]
+    ensure_file(filename, cols)
+    df = pd.read_csv(filename)
+
+    # Ensure required columns exist (in case you edited CSVs manually)
     for c in cols:
         if c not in df.columns:
             df[c] = None
-    return df[cols].copy()
+
+    df = df[cols].copy()
+
+    # If a CSV got polluted with a None row, drop fully-empty rows
+    df = df.dropna(how="all")
+
+    return df
 
 def save_df(key: str, df: pd.DataFrame) -> None:
     filename, cols = FILES[key]
@@ -41,17 +53,20 @@ cards = load_df("cards")
 fixed = load_df("fixed")
 
 # ---- Clean types ----
-for df, col in [
-    (assets, "balance"),
-    (liabilities, "balance"),
-    (cards, "balance"),
-    (cards, "due"),
-    (fixed, "amount"),
-]:
-    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+def to_number(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce").fillna(0.0)
 
-for df, col in [(cards, "is_due"), (fixed, "is_due")]:
-    df[col] = df[col].fillna(False).astype(bool)
+def to_bool(series: pd.Series) -> pd.Series:
+    return series.fillna(False).astype(bool)
+
+assets["balance"] = to_number(assets["balance"])
+liabilities["balance"] = to_number(liabilities["balance"])
+cards["balance"] = to_number(cards["balance"])
+cards["due"] = to_number(cards["due"])
+fixed["amount"] = to_number(fixed["amount"])
+
+cards["is_due"] = to_bool(cards["is_due"])
+fixed["is_due"] = to_bool(fixed["is_due"])
 
 # ---- Layout: Top row ----
 c1, c2, c3 = st.columns(3)
@@ -103,7 +118,7 @@ with c3:
 
 st.divider()
 
-# ---- Second row: Fixed + Summary ----
+# ---- Second row: Fixed + Overview ----
 left, right = st.columns([1.3, 0.7])
 
 with left:
@@ -123,21 +138,37 @@ with left:
     fixed_due = float(fixed_edit.loc[fixed_edit["is_due"] == True, "amount"].sum()) if not fixed_edit.empty else 0.0
 
 with right:
-    st.subheader("Summary")
-    due_now = cards_due + fixed_due
-    net_position = assets_total - liab_total - cards_total
-    cash_position = assets_total - cards_total  # quick "cash vs cards" view
+    st.subheader("Cash & Due Overview")
 
-    k1, k2 = st.columns(2)
-    k1.metric("Due now", money(due_now))
-    k2.metric("Net position", money(net_position))
+    due_now = cards_due + fixed_due
+
+    not_due_cards = max(cards_total - cards_due, 0.0)
+    not_due_fixed = max(fixed_total - fixed_due, 0.0)
+    total_not_due = not_due_cards + not_due_fixed
+
+    net_position = assets_total - liab_total - cards_total
+    cash_position = assets_total - cards_total
+
+    r1, r2 = st.columns(2)
+    r1.metric("Due now", money(due_now))
+    r2.metric("Not due", money(total_not_due))
 
     st.markdown("---")
-    st.markdown("**Breakdown**")
-    st.write(f"Assets total: {money(assets_total)}")
-    st.write(f"Liabilities total: {money(liab_total)}")
-    st.write(f"Card balances: {money(cards_total)}")
-    st.write(f"Fixed monthly total: {money(fixed_total)}")
-    st.write(f"Cash position (assets - cards): {money(cash_position)}")
-    st.write(f"Cards due: {money(cards_due)}")
-    st.write(f"Fixed due: {money(fixed_due)}")
+    st.metric("Net position", money(net_position))
+    st.metric("Cash position (assets - cards)", money(cash_position))
+
+    st.markdown("---")
+    st.markdown("### Due Items")
+
+    due_cards_df = cards_edit[cards_edit["is_due"] == True].copy()
+    due_fixed_df = fixed_edit[fixed_edit["is_due"] == True].copy()
+
+    if due_cards_df.empty and due_fixed_df.empty:
+        st.write("Nothing currently marked as due ✅")
+    else:
+        if not due_cards_df.empty:
+            st.write("**Cards due:**")
+            st.dataframe(due_cards_df[["card", "due"]], use_container_width=True)
+        if not due_fixed_df.empty:
+            st.write("**Fixed due:**")
+            st.dataframe(due_fixed_df[["item", "amount"]], use_container_width=True)
