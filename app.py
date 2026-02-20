@@ -7,13 +7,11 @@ st.title("Stabler Family Finances")
 
 FILES = {
     "assets": ("assets.csv", ["account", "balance"]),
-    "liabilities": ("liabilities.csv", ["account", "balance"]),
     "cards": ("credit_cards.csv", ["card", "balance", "due", "is_due"]),
     "fixed": ("fixed_costs.csv", ["item", "amount", "is_due"]),
 }
 
 def ensure_file(filename: str, cols: list[str]) -> None:
-    """Create the file with just headers if it doesn't exist."""
     path = Path(filename)
     if not path.exists():
         pd.DataFrame(columns=cols).to_csv(path, index=False)
@@ -23,22 +21,17 @@ def load_df(key: str) -> pd.DataFrame:
     ensure_file(filename, cols)
     df = pd.read_csv(filename)
 
-    # Ensure required columns exist (in case you edited CSVs manually)
     for c in cols:
         if c not in df.columns:
             df[c] = None
 
     df = df[cols].copy()
-
-    # If a CSV got polluted with a None row, drop fully-empty rows
-    df = df.dropna(how="all")
-
+    df = df.dropna(how="all")  # remove fully empty rows if any
     return df
 
 def save_df(key: str, df: pd.DataFrame) -> None:
     filename, cols = FILES[key]
-    out = df.copy()[cols]
-    out.to_csv(filename, index=False)
+    df.copy()[cols].to_csv(filename, index=False)
 
 def money(x) -> str:
     try:
@@ -46,30 +39,27 @@ def money(x) -> str:
     except Exception:
         return "£0.00"
 
-# ---- Load data ----
-assets = load_df("assets")
-liabilities = load_df("liabilities")
-cards = load_df("cards")
-fixed = load_df("fixed")
-
-# ---- Clean types ----
 def to_number(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce").fillna(0.0)
 
 def to_bool(series: pd.Series) -> pd.Series:
     return series.fillna(False).astype(bool)
 
+# ---- Load data ----
+assets = load_df("assets")
+cards = load_df("cards")
+fixed = load_df("fixed")
+
+# ---- Clean types ----
 assets["balance"] = to_number(assets["balance"])
-liabilities["balance"] = to_number(liabilities["balance"])
 cards["balance"] = to_number(cards["balance"])
 cards["due"] = to_number(cards["due"])
-fixed["amount"] = to_number(fixed["amount"])
-
 cards["is_due"] = to_bool(cards["is_due"])
+fixed["amount"] = to_number(fixed["amount"])
 fixed["is_due"] = to_bool(fixed["is_due"])
 
-# ---- Layout: Top row ----
-c1, c2, c3 = st.columns(3)
+# ---- Top row: Assets | Cards | Overview ----
+c1, c2, c3 = st.columns([1, 1, 1])
 
 with c1:
     st.subheader("Assets")
@@ -86,20 +76,6 @@ with c1:
     assets_total = float(assets_edit["balance"].sum()) if not assets_edit.empty else 0.0
 
 with c2:
-    st.subheader("Liabilities")
-    liab_edit = st.data_editor(
-        liabilities,
-        key="liabilities_editor",
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "balance": st.column_config.NumberColumn("Balance", format="£%.2f")
-        },
-    )
-    save_df("liabilities", liab_edit)
-    liab_total = float(liab_edit["balance"].sum()) if not liab_edit.empty else 0.0
-
-with c3:
     st.subheader("Credit Cards")
     cards_edit = st.data_editor(
         cards,
@@ -113,12 +89,20 @@ with c3:
         },
     )
     save_df("cards", cards_edit)
+
     cards_total = float(cards_edit["balance"].sum()) if not cards_edit.empty else 0.0
     cards_due = float(cards_edit.loc[cards_edit["is_due"] == True, "due"].sum()) if not cards_edit.empty else 0.0
 
+with c3:
+    st.subheader("Cash & Due Overview")
+
+    # Monthly fixed gets calculated later; placeholder for now
+    # We'll compute properly after fixed section, but we can show partials now
+    st.caption("Scroll down for full due item list 👇")
+
 st.divider()
 
-# ---- Second row: Fixed + Overview ----
+# ---- Second row: Monthly Fixed | Overview + Due Items ----
 left, right = st.columns([1.3, 0.7])
 
 with left:
@@ -134,6 +118,7 @@ with left:
         },
     )
     save_df("fixed", fixed_edit)
+
     fixed_total = float(fixed_edit["amount"].sum()) if not fixed_edit.empty else 0.0
     fixed_due = float(fixed_edit.loc[fixed_edit["is_due"] == True, "amount"].sum()) if not fixed_edit.empty else 0.0
 
@@ -141,20 +126,19 @@ with right:
     st.subheader("Cash & Due Overview")
 
     due_now = cards_due + fixed_due
-
     not_due_cards = max(cards_total - cards_due, 0.0)
     not_due_fixed = max(fixed_total - fixed_due, 0.0)
     total_not_due = not_due_cards + not_due_fixed
 
-    net_position = assets_total - liab_total - cards_total
-    cash_position = assets_total - cards_total
+    net_position = assets_total - cards_total
+    cash_position = assets_total - cards_total  # same meaning in this simplified model
 
     r1, r2 = st.columns(2)
     r1.metric("Due now", money(due_now))
     r2.metric("Not due", money(total_not_due))
 
     st.markdown("---")
-    st.metric("Net position", money(net_position))
+    st.metric("Net position (assets - cards)", money(net_position))
     st.metric("Cash position (assets - cards)", money(cash_position))
 
     st.markdown("---")
