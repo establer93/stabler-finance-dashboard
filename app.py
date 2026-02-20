@@ -104,12 +104,22 @@ def _clean_cols(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
+def _coerce_bool_col(s: pd.Series, default=False) -> pd.Series:
+    if s is None:
+        return pd.Series([], dtype=bool)
+    if s.dtype == bool:
+        return s.fillna(default)
+    ss = s.astype(str).str.strip().str.lower()
+    return ss.isin(["true", "1", "yes", "y", "t", "checked"]).fillna(default)
+
+# ------------------------
+# Normalizers (backward compatible)
+# ------------------------
 def normalize_assets(df: pd.DataFrame) -> pd.DataFrame:
     df = _clean_cols(df)
     if "Account" not in df.columns: df["Account"] = ""
     if "Currency" not in df.columns: df["Currency"] = "GBP"
     if "Balance (native)" not in df.columns:
-        # common aliases
         for a in ["Balance", "balance", "Amount", "amount", "Value", "value"]:
             if a in df.columns:
                 df = df.rename(columns={a: "Balance (native)"})
@@ -121,34 +131,22 @@ def normalize_assets(df: pd.DataFrame) -> pd.DataFrame:
     return df[["Account", "Currency", "Balance (native)"]]
 
 def normalize_cards(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Backward compatible:
-    - Old: Due this cycle (native) -> Balance Due (native)
-    - Old: Currency column may exist; we ignore it now
-    - Accept aliases: balance / due / amount
-    """
     df = _clean_cols(df)
 
-    # Rename common old/new names
     rename_map = {}
-
-    # Card
     if "Card" not in df.columns:
         for a in ["card", "Name", "name"]:
             if a in df.columns:
                 rename_map[a] = "Card"
                 break
 
-    # Balance
     if "Balance (native)" not in df.columns:
         for a in ["Balance", "balance", "Amount", "amount", "Value", "value"]:
             if a in df.columns:
                 rename_map[a] = "Balance (native)"
                 break
 
-    # Balance Due (native) (your new field)
     if "Balance Due (native)" not in df.columns:
-        # old schema uses this:
         if "Due this cycle (native)" in df.columns:
             rename_map["Due this cycle (native)"] = "Balance Due (native)"
         else:
@@ -160,7 +158,6 @@ def normalize_cards(df: pd.DataFrame) -> pd.DataFrame:
     if rename_map:
         df = df.rename(columns=rename_map)
 
-    # Ensure required columns exist
     if "Card" not in df.columns:
         df["Card"] = ""
     if "Balance (native)" not in df.columns:
@@ -168,11 +165,9 @@ def normalize_cards(df: pd.DataFrame) -> pd.DataFrame:
     if "Balance Due (native)" not in df.columns:
         df["Balance Due (native)"] = 0.0
 
-    # Coerce money
     df["Balance (native)"] = _to_float(df["Balance (native)"])
     df["Balance Due (native)"] = _to_float(df["Balance Due (native)"])
 
-    # Keep ONLY the columns you want visible/used
     return df[["Card", "Balance (native)", "Balance Due (native)"]]
 
 def normalize_reim(df: pd.DataFrame) -> pd.DataFrame:
@@ -188,7 +183,7 @@ def normalize_reim(df: pd.DataFrame) -> pd.DataFrame:
     if "Include?" not in df.columns:
         df["Include?"] = False
     df["Amount (GBP)"] = _to_float(df["Amount (GBP)"])
-    df["Include?"] = df["Include?"].astype(bool)
+    df["Include?"] = _coerce_bool_col(df["Include?"], default=False)
     return df[["Source", "Amount (GBP)", "Include?"]]
 
 def normalize_fixed(df: pd.DataFrame) -> pd.DataFrame:
@@ -204,21 +199,48 @@ def normalize_fixed(df: pd.DataFrame) -> pd.DataFrame:
     if "Due?" not in df.columns:
         df["Due?"] = True
     df["Amount (GBP)"] = _to_float(df["Amount (GBP)"])
-    df["Due?"] = df["Due?"].astype(bool)
+    df["Due?"] = _coerce_bool_col(df["Due?"], default=True)
     return df[["Item", "Amount (GBP)", "Due?"]]
 
 def normalize_pay(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    New schema:
+      Person | Monthly Pay (GBP) | Paid?
+    Backward compatible:
+      - If old column Monthly pay (£) exists, rename
+      - If Paid? missing, default False
+    """
     df = _clean_cols(df)
-    if "Person" not in df.columns: df["Person"] = ""
-    if "Monthly pay (£)" not in df.columns:
-        for a in ["Monthly pay", "Pay", "pay", "Amount", "amount"]:
-            if a in df.columns:
-                df = df.rename(columns={a: "Monthly pay (£)"})
-                break
-        if "Monthly pay (£)" not in df.columns:
-            df["Monthly pay (£)"] = 0.0
-    df["Monthly pay (£)"] = _to_float(df["Monthly pay (£)"])
-    return df[["Person", "Monthly pay (£)"]]
+
+    # rename old monthly pay col -> new
+    if "Monthly Pay (GBP)" not in df.columns:
+        if "Monthly pay (£)" in df.columns:
+            df = df.rename(columns={"Monthly pay (£)": "Monthly Pay (GBP)"})
+        else:
+            for a in ["Monthly pay", "Pay", "pay", "Amount", "amount", "salary"]:
+                if a in df.columns:
+                    df = df.rename(columns={a: "Monthly Pay (GBP)"})
+                    break
+
+    if "Person" not in df.columns:
+        df["Person"] = ""
+
+    if "Monthly Pay (GBP)" not in df.columns:
+        df["Monthly Pay (GBP)"] = 0.0
+
+    if "Paid?" not in df.columns:
+        # old schemas sometimes had 'Paid' / 'paid'
+        if "Paid" in df.columns:
+            df = df.rename(columns={"Paid": "Paid?"})
+        elif "paid" in df.columns:
+            df = df.rename(columns={"paid": "Paid?"})
+        else:
+            df["Paid?"] = False
+
+    df["Monthly Pay (GBP)"] = _to_float(df["Monthly Pay (GBP)"])
+    df["Paid?"] = _coerce_bool_col(df["Paid?"], default=False)
+
+    return df[["Person", "Monthly Pay (GBP)", "Paid?"]]
 
 # ------------------------
 # Defaults
@@ -271,8 +293,12 @@ def defaults_fixed():
     )
 
 def defaults_pay():
+    # Requested defaults: Eric 6100, Gigi 6000
     return pd.DataFrame(
-        [{"Person": "Eric", "Monthly pay (£)": 0.0}, {"Person": "Gigi", "Monthly pay (£)": 0.0}]
+        [
+            {"Person": "Eric", "Monthly Pay (GBP)": 6100.0, "Paid?": False},
+            {"Person": "Gigi", "Monthly Pay (GBP)": 6000.0, "Paid?": False},
+        ]
     )
 
 # ------------------------
@@ -303,10 +329,6 @@ st.session_state.pay = normalize_pay(st.session_state.pay)
 # Backup ZIP
 # ------------------------
 def make_zip() -> bytes:
-    """
-    IMPORTANT: We save using the CURRENT schema
-    so restore is always clean going forward.
-    """
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("assets.csv", st.session_state.assets.to_csv(index=False))
@@ -323,11 +345,6 @@ def make_zip() -> bytes:
     return mem.getvalue()
 
 def restore_zip(blob: bytes):
-    """
-    Backward compatible restore:
-    - Reads old files
-    - Normalizes them into the CURRENT schema
-    """
     mem = io.BytesIO(blob)
     with zipfile.ZipFile(mem, "r") as z:
         def read(name):
@@ -384,7 +401,7 @@ if st.session_state.fx_override_on:
     rate = float(st.session_state.fx_override_rate)
 
 # ------------------------
-# Totals (USD->GBP conversion)
+# Totals
 # ------------------------
 assets_df = st.session_state.assets.copy()
 assets_gbp = []
@@ -401,7 +418,6 @@ for _, r in cards_df.iterrows():
     usd = is_usd_item(str(r.get("Card", "")))
     card_bal_gbp.append(to_gbp(float(r["Balance (native)"]), usd, rate))
     card_due_gbp.append(to_gbp(float(r["Balance Due (native)"]), usd, rate))
-
 total_card_bal_gbp = float(sum(card_bal_gbp))
 total_card_due_gbp = float(sum(card_due_gbp))
 
@@ -410,12 +426,19 @@ included_reim_gbp = float(reim_df.loc[reim_df["Include?"] == True, "Amount (GBP)
 
 fixed_df = st.session_state.fixed.copy()
 fixed_due_gbp = float(fixed_df.loc[fixed_df["Due?"] == True, "Amount (GBP)"].sum())  # noqa: E712
+fixed_total_gbp = float(fixed_df["Amount (GBP)"].sum())
+
+pay_df = st.session_state.pay.copy()
+# ✅ only count pay lines where Paid? is ticked
+paid_pay_gbp = float(pay_df.loc[pay_df["Paid?"] == True, "Monthly Pay (GBP)"].sum())  # noqa: E712
 
 net_cash_gbp = total_assets_gbp - total_card_bal_gbp + included_reim_gbp
-total_spend_rest_month_gbp = fixed_due_gbp + total_card_due_gbp
+
+# ✅ Your formula (but with Paid? controlling pay inclusion)
+projected_available_gbp = net_cash_gbp + (paid_pay_gbp - fixed_total_gbp)
 
 # ------------------------
-# KPIs (coloured)
+# KPIs
 # ------------------------
 k1, k2, k3 = st.columns(3)
 with k1:
@@ -423,12 +446,12 @@ with k1:
 with k2:
     kpi("Total Credit Card Bill Due (GBP)", total_card_due_gbp, force_neutral=True)
 with k3:
-    kpi("Total Spend Rest of Month (GBP)", total_spend_rest_month_gbp, force_neutral=True)
+    kpi("Projected Available This Month (GBP)", projected_available_gbp)
 
 st.divider()
 
 # ------------------------
-# Row 1: Assets | Cards | Reimbursements
+# Row 1
 # ------------------------
 a, b, c = st.columns([1.2, 1.1, 1.1])
 
@@ -495,7 +518,7 @@ with c:
 st.divider()
 
 # ------------------------
-# Row 2: Monthly Fixed | Pay Cycle
+# Row 2
 # ------------------------
 d, e = st.columns([2.1, 1.0])
 
@@ -514,11 +537,20 @@ with d:
             },
         )
     )
-    totals_line("Fixed Due This Month (GBP):", fixed_due_gbp)
+    st.markdown(
+        f"""
+<div class="totals">
+  Fixed Due This Month: <span class="neu">{gbp(fixed_due_gbp)}</span>
+  &nbsp;&nbsp;•&nbsp;&nbsp;
+  Fixed Total Monthly: <span class="neu">{gbp(fixed_total_gbp)}</span>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
 with e:
-    st.subheader("Pay Cycle (setup)")
-    st.caption("Optional – for future projections.")
+    st.subheader("Monthly Pay")
+    st.caption("Tick Paid? when the salary has landed (only ticked rows count in the projection).")
     st.session_state.pay = normalize_pay(
         st.data_editor(
             st.session_state.pay,
@@ -527,15 +559,17 @@ with e:
             key="pay_editor",
             column_config={
                 "Person": st.column_config.TextColumn("Person"),
-                "Monthly pay (£)": st.column_config.NumberColumn("Monthly pay (£)", format="%.2f"),
+                "Monthly Pay (GBP)": st.column_config.NumberColumn("Monthly Pay", format="%.2f"),
+                "Paid?": st.column_config.CheckboxColumn("Paid?"),
             },
         )
     )
+    totals_line("Total Pay Counted (Paid only):", paid_pay_gbp)
 
 st.divider()
 
 # ------------------------
-# FX (bottom)
+# FX bottom
 # ------------------------
 st.subheader("FX (USD → GBP)")
 st.caption("Apple Savings + Apple Card are treated as USD and converted to GBP for totals.")
