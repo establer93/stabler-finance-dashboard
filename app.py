@@ -11,51 +11,27 @@ FILES = {
     "assets": ("assets.csv", ["account", "balance"]),
     "cards": ("credit_cards.csv", ["card", "balance", "due", "is_due"]),
     "reimb": ("reimbursement_pending.csv", ["item", "amount", "include"]),
-    # UPDATED schema for fixed:
     "fixed": ("fixed_costs.csv", ["item", "amount", "monthly", "due_now"]),
 }
-
-DEFAULT_REIMB_ROWS = pd.DataFrame(
-    [
-        {"item": "Eric Work", "amount": "0", "include": True},
-        {"item": "Gigi Work", "amount": "0", "include": True},
-        {"item": "Misc", "amount": "0", "include": False},
-    ]
-)
 
 # -------------------------
 # Helpers
 # -------------------------
-def ensure_file(filename: str, cols: list[str], default_df: pd.DataFrame | None = None) -> None:
+def ensure_file(filename: str, cols: list[str]) -> None:
     path = Path(filename)
-    if path.exists():
-        return
-    if default_df is not None:
-        out = default_df.copy()
-        for c in cols:
-            if c not in out.columns:
-                out[c] = None
-        out = out[cols]
-        out.to_csv(path, index=False)
-    else:
+    if not path.exists():
         pd.DataFrame(columns=cols).to_csv(path, index=False)
 
 def load_df(key: str) -> pd.DataFrame:
     filename, cols = FILES[key]
-
-    if key == "reimb":
-        ensure_file(filename, cols, DEFAULT_REIMB_ROWS)
-    else:
-        ensure_file(filename, cols)
-
+    ensure_file(filename, cols)
     df = pd.read_csv(filename)
 
     for c in cols:
         if c not in df.columns:
             df[c] = None
 
-    df = df[cols].copy().dropna(how="all")
-    return df
+    return df[cols].copy().dropna(how="all")
 
 def save_df(key: str, df: pd.DataFrame) -> None:
     filename, cols = FILES[key]
@@ -64,98 +40,26 @@ def save_df(key: str, df: pd.DataFrame) -> None:
 def money(x) -> str:
     try:
         return f"£{float(x):,.2f}"
-    except Exception:
+    except:
         return "£0.00"
 
 def to_bool(series: pd.Series) -> pd.Series:
-    s = series.copy()
-    s = s.replace({"TRUE": True, "FALSE": False, "true": True, "false": False})
-    return s.fillna(False).astype(bool)
+    return series.fillna(False).astype(bool)
 
-def parse_money_cell(v) -> float:
+def parse_money(v) -> float:
     if v is None:
         return 0.0
-    s = str(v).strip()
-    if s == "" or s.lower() in {"nan", "none"}:
-        return 0.0
-
-    s = s.replace("£", "").replace(" ", "")
-
-    if "," in s and "." in s:
-        s = s.replace(",", "")
-    else:
-        s = s.replace(",", ".")
-
-    s = re.sub(r"[^0-9\.\-]", "", s)
-
+    s = str(v).replace("£", "").replace(",", "").strip()
     try:
         return float(s)
-    except Exception:
+    except:
         return 0.0
 
-def normalize_money_column(df: pd.DataFrame, col: str) -> pd.Series:
-    return df[col].apply(parse_money_cell)
-
-def df_to_records(df: pd.DataFrame) -> list[dict]:
-    return json.loads(df.to_json(orient="records"))
-
-def records_to_df(records: list[dict], cols: list[str]) -> pd.DataFrame:
-    df = pd.DataFrame(records)
-    for c in cols:
-        if c not in df.columns:
-            df[c] = None
-    return df[cols].copy()
+def normalize_money_column(df, col):
+    return df[col].apply(parse_money)
 
 # -------------------------
-# Backup / Restore
-# -------------------------
-assets0 = load_df("assets")
-cards0 = load_df("cards")
-reimb0 = load_df("reimb")
-fixed0 = load_df("fixed")
-
-backup_payload = {
-    "version": 2,
-    "assets": df_to_records(assets0),
-    "cards": df_to_records(cards0),
-    "reimb": df_to_records(reimb0),
-    "fixed": df_to_records(fixed0),
-}
-backup_json = json.dumps(backup_payload, indent=2)
-
-with st.expander("Backup / Restore", expanded=False):
-    st.download_button(
-        label="Download backup.json",
-        data=backup_json,
-        file_name="stabler_finances_backup.json",
-        mime="application/json",
-        use_container_width=True,
-    )
-
-    uploaded = st.file_uploader("Restore from backup.json", type=["json"])
-    if uploaded is not None:
-        try:
-            payload = json.loads(uploaded.read().decode("utf-8"))
-
-            a = records_to_df(payload.get("assets", []), FILES["assets"][1])
-            c = records_to_df(payload.get("cards", []), FILES["cards"][1])
-            r = records_to_df(payload.get("reimb", []), FILES["reimb"][1])
-            f = records_to_df(payload.get("fixed", []), FILES["fixed"][1])
-
-            save_df("assets", a)
-            save_df("cards", c)
-            save_df("reimb", r)
-            save_df("fixed", f)
-
-            st.success("Restored ✅ Refreshing…")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Couldn’t restore backup: {e}")
-
-st.divider()
-
-# -------------------------
-# Load data for app sections
+# Load Data
 # -------------------------
 assets = load_df("assets")
 cards = load_df("cards")
@@ -167,7 +71,6 @@ reimb["include"] = to_bool(reimb["include"])
 fixed["monthly"] = to_bool(fixed["monthly"])
 fixed["due_now"] = to_bool(fixed["due_now"])
 
-# Convert money cols to strings for editing (iPad-safe)
 for df, col in [
     (assets, "balance"),
     (cards, "balance"),
@@ -178,32 +81,56 @@ for df, col in [
     df[col] = df[col].fillna("").astype(str)
 
 # -------------------------
-# TOP ROW
+# CALCULATIONS (moved BEFORE UI)
+# -------------------------
+assets_total = normalize_money_column(assets, "balance").sum()
+cards_total_balance = normalize_money_column(cards, "balance").sum()
+cards_bill_due_total = normalize_money_column(cards, "due").sum()
+cards_due_now = normalize_money_column(cards[cards["is_due"] == True], "due").sum()
+
+reimb_total = normalize_money_column(
+    reimb[reimb["include"] == True], "amount"
+).sum()
+
+fixed_due_now_total = normalize_money_column(
+    fixed[fixed["due_now"] == True], "amount"
+).sum()
+
+net_cash = assets_total - cards_total_balance
+total_spend_rest_month = fixed_due_now_total + reimb_total + cards_due_now
+
+# -------------------------
+# 🔥 TOP METRICS (NOW AT TOP)
+# -------------------------
+m1, m2, m3 = st.columns(3)
+m1.metric("Net Cash", money(net_cash))
+m2.metric("Total Credit Card Bill Due", money(cards_bill_due_total))
+m3.metric("Total Spend Rest of Month", money(total_spend_rest_month))
+
+st.divider()
+
+# -------------------------
+# TOP ROW TABLES
 # -------------------------
 col1, col2, col3 = st.columns(3)
 
 with col1:
     st.subheader("Assets")
-    assets_edit = st.data_editor(
+    edit = st.data_editor(
         assets,
-        key="assets_editor",
+        key="assets",
         num_rows="dynamic",
         use_container_width=True,
         column_config={"balance": st.column_config.TextColumn("Balance (£)")},
     )
-
-    assets_out = assets_edit.copy()
-    assets_out["balance"] = normalize_money_column(assets_out, "balance")
-    save_df("assets", assets_out)
-
-    assets_total = float(assets_out["balance"].sum()) if not assets_out.empty else 0.0
-    st.caption(f"Total Assets: {money(assets_total)}")
+    edit["balance"] = normalize_money_column(edit, "balance")
+    save_df("assets", edit)
 
 with col2:
     st.subheader("Credit Cards")
-    cards_edit = st.data_editor(
+    edit = st.data_editor(
         cards,
-        key="cards_editor",
+        key="cards",
         num_rows="dynamic",
         use_container_width=True,
         column_config={
@@ -212,22 +139,15 @@ with col2:
             "is_due": st.column_config.CheckboxColumn("Due?"),
         },
     )
-
-    cards_out = cards_edit.copy()
-    cards_out["is_due"] = to_bool(cards_out["is_due"])
-    cards_out["balance"] = normalize_money_column(cards_out, "balance")
-    cards_out["due"] = normalize_money_column(cards_out, "due")
-    save_df("cards", cards_out)
-
-    cards_total_balance = float(cards_out["balance"].sum()) if not cards_out.empty else 0.0
-    cards_bill_due_total = float(cards_out["due"].sum()) if not cards_out.empty else 0.0
-    st.caption(f"Total Card Balances: {money(cards_total_balance)} · Total Bills Due: {money(cards_bill_due_total)}")
+    edit["balance"] = normalize_money_column(edit, "balance")
+    edit["due"] = normalize_money_column(edit, "due")
+    save_df("cards", edit)
 
 with col3:
     st.subheader("Reimbursement Pending")
-    reimb_edit = st.data_editor(
+    edit = st.data_editor(
         reimb,
-        key="reimb_editor",
+        key="reimb",
         num_rows="fixed",
         use_container_width=True,
         column_config={
@@ -235,54 +155,27 @@ with col3:
             "include": st.column_config.CheckboxColumn("Include this month?"),
         },
     )
-
-    reimb_out = reimb_edit.copy()
-    reimb_out["include"] = to_bool(reimb_out["include"])
-    reimb_out["amount"] = normalize_money_column(reimb_out, "amount")
-    save_df("reimb", reimb_out)
-
-    reimb_total = float(reimb_out.loc[reimb_out["include"] == True, "amount"].sum()) if not reimb_out.empty else 0.0
-    st.caption(f"Included Reimbursements: {money(reimb_total)}")
+    edit["amount"] = normalize_money_column(edit, "amount")
+    save_df("reimb", edit)
 
 st.divider()
 
 # -------------------------
-# Monthly Fixed (two toggles)
+# MONTHLY FIXED
 # -------------------------
-with st.expander("Monthly Fixed", expanded=True):
-    fixed_edit = st.data_editor(
-        fixed,
-        key="fixed_editor",
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "amount": st.column_config.TextColumn("Amount (£)"),
-            "monthly": st.column_config.CheckboxColumn("Monthly?"),
-            "due_now": st.column_config.CheckboxColumn("Due Now?"),
-        },
-    )
+st.subheader("Monthly Fixed")
 
-    fixed_out = fixed_edit.copy()
-    fixed_out["monthly"] = to_bool(fixed_out["monthly"])
-    fixed_out["due_now"] = to_bool(fixed_out["due_now"])
-    fixed_out["amount"] = normalize_money_column(fixed_out, "amount")
-    save_df("fixed", fixed_out)
+edit = st.data_editor(
+    fixed,
+    key="fixed",
+    num_rows="dynamic",
+    use_container_width=True,
+    column_config={
+        "amount": st.column_config.TextColumn("Amount (£)"),
+        "monthly": st.column_config.CheckboxColumn("Monthly?"),
+        "due_now": st.column_config.CheckboxColumn("Due Now?"),
+    },
+)
 
-    fixed_monthly_total = float(fixed_out.loc[fixed_out["monthly"] == True, "amount"].sum()) if not fixed_out.empty else 0.0
-    fixed_due_now_total = float(fixed_out.loc[fixed_out["due_now"] == True, "amount"].sum()) if not fixed_out.empty else 0.0
-
-    st.caption(f"Monthly Total: {money(fixed_monthly_total)} · Due Now Total: {money(fixed_due_now_total)}")
-
-st.divider()
-
-# -------------------------
-# SECOND ROW METRICS
-# -------------------------
-net_cash = assets_total - cards_total_balance
-cards_due_now = float(cards_out.loc[cards_out["is_due"] == True, "due"].sum()) if not cards_out.empty else 0.0
-total_spend_rest_month = fixed_due_now_total + reimb_total + cards_due_now
-
-m1, m2, m3 = st.columns(3)
-m1.metric("Net Cash", money(net_cash))
-m2.metric("Total Credit Card Bill Due", money(cards_bill_due_total))
-m3.metric("Total Spend Rest of Month", money(total_spend_rest_month))
+edit["amount"] = normalize_money_column(edit, "amount")
+save_df("fixed", edit)
