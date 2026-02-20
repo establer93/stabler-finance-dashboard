@@ -1,5 +1,5 @@
 # app.py
-# Stabler Family Finances — CSV-backed (download/restore ZIP) + live FX for USD -> GBP
+# Stabler Family Finances — CSV-backed (download/restore ZIP) + CSV import mapping + live FX for USD -> GBP
 # No Supabase. Data persists via downloaded ZIP backups you can restore anytime.
 
 import io
@@ -20,9 +20,13 @@ def _norm_currency(x) -> str:
     return str(x).strip().upper() if x is not None else "GBP"
 
 def _coerce_money_series(s: pd.Series) -> pd.Series:
-    # Handles "", None, "£1,234.50", "1,234.50", "1 234,50" (light cleanup), etc.
     s = s.astype(str)
-    s = s.str.replace("£", "", regex=False).str.replace(",", "", regex=False).str.strip()
+    s = (
+        s.str.replace("£", "", regex=False)
+        .str.replace(",", "", regex=False)
+        .str.replace(" ", "", regex=False)
+        .str.strip()
+    )
     return pd.to_numeric(s, errors="coerce").fillna(0.0)
 
 def _coerce_bool_series(s: pd.Series, default=False) -> pd.Series:
@@ -30,18 +34,12 @@ def _coerce_bool_series(s: pd.Series, default=False) -> pd.Series:
         return pd.Series([default] * 0)
     if s.dtype == bool:
         return s.fillna(default)
-    # Accept TRUE/FALSE, 1/0, yes/no
     ss = s.astype(str).str.strip().str.lower()
-    return ss.isin(["true", "1", "yes", "y", "t"]).fillna(default)
+    return ss.isin(["true", "1", "yes", "y", "t", "checked"]).fillna(default)
 
 @st.cache_data(ttl=60 * 30)  # 30 min
 def fetch_usd_to_gbp() -> float | None:
-    """
-    Fetch USD->GBP. Returns None if unavailable.
-    Uses a simple public endpoint. If it ever fails, you can still set manual FX below.
-    """
     try:
-        # exchangerate.host has been unreliable for some; this tends to be simple + stable:
         r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=8)
         r.raise_for_status()
         data = r.json()
@@ -64,6 +62,34 @@ def fmt_gbp(x: float) -> str:
         return f"£{float(x):,.2f}"
     except Exception:
         return "£0.00"
+
+def _clean_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+def _lower_nospace(s: str) -> str:
+    return "".join(str(s).strip().lower().split())
+
+def _map_columns(df: pd.DataFrame, mapping: dict[str, list[str]]) -> pd.DataFrame:
+    """
+    mapping: {target_col: [possible source col names...]}
+    case/space-insensitive match.
+    """
+    df = _clean_cols(df)
+    src_lookup = {_lower_nospace(c): c for c in df.columns}
+
+    out = df.copy()
+    for target, options in mapping.items():
+        found = None
+        for opt in options:
+            key = _lower_nospace(opt)
+            if key in src_lookup:
+                found = src_lookup[key]
+                break
+        if found is not None and found != target:
+            out = out.rename(columns={found: target})
+    return out
 
 # -----------------------------
 # Default data
@@ -96,7 +122,6 @@ def default_reimbursements() -> pd.DataFrame:
     )
 
 def default_fixed_costs() -> pd.DataFrame:
-    # From your screenshot
     rows = [
         ("Savings", 5000.00, True),
         ("RAC", 300.00, True),
@@ -116,7 +141,6 @@ def default_fixed_costs() -> pd.DataFrame:
     return pd.DataFrame([{"Item": i, "Amount (GBP)": a, "Due?": d} for i, a, d in rows])
 
 def default_pay_cycle() -> pd.DataFrame:
-    # Setup-only — optional
     return pd.DataFrame(
         [
             {"Person": "Eric", "Monthly pay (£)": 0.0},
@@ -125,97 +149,7 @@ def default_pay_cycle() -> pd.DataFrame:
     )
 
 # -----------------------------
-# Session state init
-# -----------------------------
-def ensure_state():
-    if "assets" not in st.session_state:
-        st.session_state.assets = default_assets()
-    if "cards" not in st.session_state:
-        st.session_state.cards = default_credit_cards()
-    if "reimb" not in st.session_state:
-        st.session_state.reimb = default_reimbursements()
-    if "fixed" not in st.session_state:
-        st.session_state.fixed = default_fixed_costs()
-    if "pay" not in st.session_state:
-        st.session_state.pay = default_pay_cycle()
-
-    # FX settings
-    if "usd_to_gbp_manual" not in st.session_state:
-        st.session_state.usd_to_gbp_manual = 0.79  # reasonable default
-    if "use_live_fx" not in st.session_state:
-        st.session_state.use_live_fx = True
-
-ensure_state()
-
-# -----------------------------
-# Sidebar: Save/Load ZIP backup
-# -----------------------------
-with st.sidebar:
-    st.subheader("Save / Load")
-
-    def build_backup_zip_bytes() -> bytes:
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
-            z.writestr("assets.csv", st.session_state.assets.to_csv(index=False))
-            z.writestr("credit_cards.csv", st.session_state.cards.to_csv(index=False))
-            z.writestr("reimbursements.csv", st.session_state.reimb.to_csv(index=False))
-            z.writestr("fixed_costs.csv", st.session_state.fixed.to_csv(index=False))
-            z.writestr("pay_cycle.csv", st.session_state.pay.to_csv(index=False))
-            meta = f"created_at={datetime.utcnow().isoformat()}Z\napp={APP_TITLE}\n"
-            z.writestr("META.txt", meta)
-        return buf.getvalue()
-
-    backup_bytes = build_backup_zip_bytes()
-    st.download_button(
-        "⬇️ Download backup (ZIP)",
-        data=backup_bytes,
-        file_name="stabler-finances-backup.zip",
-        mime="application/zip",
-        use_container_width=True,
-    )
-
-    st.write("")
-    uploaded = st.file_uploader("⬆️ Restore from backup (ZIP)", type=["zip"], accept_multiple_files=False)
-
-    if uploaded is not None:
-        try:
-            zdata = uploaded.read()
-            with zipfile.ZipFile(io.BytesIO(zdata), "r") as z:
-                def read_csv(name: str) -> pd.DataFrame:
-                    with z.open(name) as f:
-                        return pd.read_csv(f)
-
-                st.session_state.assets = read_csv("assets.csv")
-                st.session_state.cards = read_csv("credit_cards.csv")
-                st.session_state.reimb = read_csv("reimbursements.csv")
-                st.session_state.fixed = read_csv("fixed_costs.csv")
-                st.session_state.pay = read_csv("pay_cycle.csv")
-
-            st.success("Backup restored.")
-            st.rerun()
-        except Exception as e:
-            st.error("That ZIP didn’t restore cleanly. Make sure it’s the backup ZIP from this app.")
-            st.code(str(e))
-
-    st.write("")
-    if st.button("Reset to defaults", use_container_width=True):
-        st.session_state.assets = default_assets()
-        st.session_state.cards = default_credit_cards()
-        st.session_state.reimb = default_reimbursements()
-        st.session_state.fixed = default_fixed_costs()
-        st.session_state.pay = default_pay_cycle()
-        st.session_state.use_live_fx = True
-        st.session_state.usd_to_gbp_manual = 0.79
-        st.rerun()
-
-# -----------------------------
-# FX (bottom, but needed for totals)
-# -----------------------------
-live_fx = fetch_usd_to_gbp() if st.session_state.use_live_fx else None
-usd_to_gbp = live_fx if (live_fx is not None and st.session_state.use_live_fx) else float(st.session_state.usd_to_gbp_manual)
-
-# -----------------------------
-# Clean + coerce dataframes (prevents Streamlit schema errors / text numbers)
+# Sanitize (prevents Streamlit schema errors)
 # -----------------------------
 def sanitize_assets(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -263,11 +197,213 @@ def sanitize_pay(df: pd.DataFrame) -> pd.DataFrame:
     df["Monthly pay (£)"] = _coerce_money_series(df["Monthly pay (£)"])
     return df[["Person", "Monthly pay (£)"]]
 
+# -----------------------------
+# CSV Import (the "re-rack fields" fix)
+# -----------------------------
+ASSETS_MAP = {
+    "Account": ["Account", "account", "name"],
+    "Currency": ["Currency", "currency", "ccy"],
+    "Balance (native)": ["Balance (native)", "Balance", "balance", "amount", "Value"],
+}
+
+CARDS_MAP = {
+    "Card": ["Card", "card", "name"],
+    "Currency": ["Currency", "currency", "ccy"],
+    "Balance (native)": ["Balance (native)", "Balance", "balance"],
+    "Due this cycle (native)": ["Due this cycle (native)", "Due this cycle", "due", "Due", "due_this_cycle"],
+    "Due?": ["Due?", "is_due", "is due", "due?"],
+}
+
+REIMB_MAP = {
+    "Source": ["Source", "source", "type", "row", "item"],
+    "Amount (GBP)": ["Amount (GBP)", "Amount", "amount", "gbp", "value"],
+    "Include?": ["Include?", "include", "include?", "count", "count_this_month"],
+}
+
+FIXED_MAP = {
+    "Item": ["Item", "item", "name", "desc", "description"],
+    "Amount (GBP)": ["Amount (GBP)", "Amount", "amount", "gbp", "value"],
+    "Due?": ["Due?", "due", "is_due", "is due"],
+}
+
+PAY_MAP = {
+    "Person": ["Person", "person", "name"],
+    "Monthly pay (£)": ["Monthly pay (£)", "Monthly pay", "pay", "amount", "salary"],
+}
+
+def import_csv_to_table(csv_bytes: bytes, table_name: str) -> pd.DataFrame:
+    df = pd.read_csv(io.BytesIO(csv_bytes))
+    df = _clean_cols(df)
+
+    if table_name == "Assets":
+        df = _map_columns(df, ASSETS_MAP)
+        # If no currency column in uploaded, default GBP
+        if "Currency" not in df.columns:
+            df["Currency"] = "GBP"
+        return sanitize_assets(df)
+
+    if table_name == "Credit Cards":
+        df = _map_columns(df, CARDS_MAP)
+        if "Currency" not in df.columns:
+            df["Currency"] = "GBP"
+        if "Due this cycle (native)" not in df.columns:
+            df["Due this cycle (native)"] = 0.0
+        if "Due?" not in df.columns:
+            df["Due?"] = False
+        return sanitize_cards(df)
+
+    if table_name == "Monthly Fixed":
+        df = _map_columns(df, FIXED_MAP)
+        if "Due?" not in df.columns:
+            df["Due?"] = True
+        return sanitize_fixed(df)
+
+    if table_name == "Reimbursements":
+        df = _map_columns(df, REIMB_MAP)
+        if "Include?" not in df.columns:
+            df["Include?"] = False
+        return sanitize_reimb(df)
+
+    if table_name == "Pay Cycle":
+        df = _map_columns(df, PAY_MAP)
+        return sanitize_pay(df)
+
+    raise ValueError("Unknown table")
+
+# -----------------------------
+# Session init
+# -----------------------------
+def ensure_state():
+    if "assets" not in st.session_state:
+        st.session_state.assets = default_assets()
+    if "cards" not in st.session_state:
+        st.session_state.cards = default_credit_cards()
+    if "reimb" not in st.session_state:
+        st.session_state.reimb = default_reimbursements()
+    if "fixed" not in st.session_state:
+        st.session_state.fixed = default_fixed_costs()
+    if "pay" not in st.session_state:
+        st.session_state.pay = default_pay_cycle()
+
+    if "usd_to_gbp_manual" not in st.session_state:
+        st.session_state.usd_to_gbp_manual = 0.79
+    if "use_live_fx" not in st.session_state:
+        st.session_state.use_live_fx = True
+
+ensure_state()
+
+# Always sanitize in case older backups/csvs had different types
 st.session_state.assets = sanitize_assets(st.session_state.assets)
 st.session_state.cards = sanitize_cards(st.session_state.cards)
 st.session_state.reimb = sanitize_reimb(st.session_state.reimb)
 st.session_state.fixed = sanitize_fixed(st.session_state.fixed)
 st.session_state.pay = sanitize_pay(st.session_state.pay)
+
+# -----------------------------
+# Sidebar: Save/Load + CSV Import
+# -----------------------------
+with st.sidebar:
+    st.subheader("Save / Load")
+
+    def build_backup_zip_bytes() -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
+            z.writestr("assets.csv", st.session_state.assets.to_csv(index=False))
+            z.writestr("credit_cards.csv", st.session_state.cards.to_csv(index=False))
+            z.writestr("reimbursements.csv", st.session_state.reimb.to_csv(index=False))
+            z.writestr("fixed_costs.csv", st.session_state.fixed.to_csv(index=False))
+            z.writestr("pay_cycle.csv", st.session_state.pay.to_csv(index=False))
+            meta = f"created_at={datetime.utcnow().isoformat()}Z\napp={APP_TITLE}\n"
+            z.writestr("META.txt", meta)
+        return buf.getvalue()
+
+    backup_bytes = build_backup_zip_bytes()
+    st.download_button(
+        "⬇️ Download backup (ZIP)",
+        data=backup_bytes,
+        file_name="stabler-finances-backup.zip",
+        mime="application/zip",
+        use_container_width=True,
+    )
+
+    st.write("")
+    uploaded_zip = st.file_uploader("⬆️ Restore from backup (ZIP)", type=["zip"], accept_multiple_files=False)
+
+    if uploaded_zip is not None:
+        try:
+            zdata = uploaded_zip.read()
+            with zipfile.ZipFile(io.BytesIO(zdata), "r") as z:
+                def read_csv(name: str) -> pd.DataFrame:
+                    with z.open(name) as f:
+                        return pd.read_csv(f)
+
+                st.session_state.assets = sanitize_assets(read_csv("assets.csv"))
+                st.session_state.cards = sanitize_cards(read_csv("credit_cards.csv"))
+                st.session_state.reimb = sanitize_reimb(read_csv("reimbursements.csv"))
+                st.session_state.fixed = sanitize_fixed(read_csv("fixed_costs.csv"))
+                st.session_state.pay = sanitize_pay(read_csv("pay_cycle.csv"))
+
+            st.success("Backup restored.")
+            st.rerun()
+        except Exception as e:
+            st.error("That ZIP didn’t restore cleanly. Make sure it’s the backup ZIP from this app.")
+            st.code(str(e))
+
+    st.divider()
+    st.subheader("Import CSV")
+
+    table_choice = st.selectbox(
+        "Import into…",
+        ["Assets", "Credit Cards", "Reimbursements", "Monthly Fixed", "Pay Cycle"],
+    )
+
+    uploaded_csv = st.file_uploader(
+        "Upload a CSV (it will auto-map headers)",
+        type=["csv"],
+        accept_multiple_files=False,
+        key="csv_import_uploader",
+    )
+
+    if uploaded_csv is not None:
+        try:
+            imported = import_csv_to_table(uploaded_csv.read(), table_choice)
+
+            st.write("Preview (after mapping):")
+            st.dataframe(imported, use_container_width=True, height=180)
+
+            if st.button(f"✅ Replace {table_choice} with this CSV", use_container_width=True):
+                if table_choice == "Assets":
+                    st.session_state.assets = imported
+                elif table_choice == "Credit Cards":
+                    st.session_state.cards = imported
+                elif table_choice == "Reimbursements":
+                    st.session_state.reimb = imported
+                elif table_choice == "Monthly Fixed":
+                    st.session_state.fixed = imported
+                elif table_choice == "Pay Cycle":
+                    st.session_state.pay = imported
+                st.success(f"{table_choice} imported.")
+                st.rerun()
+        except Exception as e:
+            st.error("Couldn’t import that CSV. Usually it’s a delimiter/header issue.")
+            st.code(str(e))
+
+    st.write("")
+    if st.button("Reset to defaults", use_container_width=True):
+        st.session_state.assets = default_assets()
+        st.session_state.cards = default_credit_cards()
+        st.session_state.reimb = default_reimbursements()
+        st.session_state.fixed = default_fixed_costs()
+        st.session_state.pay = default_pay_cycle()
+        st.session_state.use_live_fx = True
+        st.session_state.usd_to_gbp_manual = 0.79
+        st.rerun()
+
+# -----------------------------
+# FX
+# -----------------------------
+live_fx = fetch_usd_to_gbp() if st.session_state.use_live_fx else None
+usd_to_gbp = live_fx if (live_fx is not None and st.session_state.use_live_fx) else float(st.session_state.usd_to_gbp_manual)
 
 # -----------------------------
 # Calculations (GBP)
@@ -282,19 +418,16 @@ card_due_gbp = convert_to_gbp(st.session_state.cards, "Currency", "Due this cycl
 total_card_bill_due_gbp = float(card_due_gbp[st.session_state.cards["Due?"] == True].sum())
 
 reimb_included_gbp = float(st.session_state.reimb.loc[st.session_state.reimb["Include?"] == True, "Amount (GBP)"].sum())
-
 fixed_due_gbp = float(st.session_state.fixed.loc[st.session_state.fixed["Due?"] == True, "Amount (GBP)"].sum())
 
-# Your top-line metrics
 net_cash_gbp = total_assets_gbp - total_card_bal_gbp + reimb_included_gbp
-total_spend_rest_month_gbp = fixed_due_gbp + total_card_bill_due_gbp  # simple + consistent
+total_spend_rest_month_gbp = fixed_due_gbp + total_card_bill_due_gbp
 
 # -----------------------------
 # UI
 # -----------------------------
 st.title(APP_TITLE)
 
-# TOP METRICS (at top of sheet)
 m1, m2, m3 = st.columns(3)
 with m1:
     st.metric("Net Cash (GBP)", fmt_gbp(net_cash_gbp))
@@ -305,12 +438,11 @@ with m3:
 
 st.divider()
 
-# TOP ROW: Assets, Credit Cards, Reimbursement Pending
+# TOP ROW
 c_assets, c_cards, c_reimb = st.columns(3)
 
 with c_assets:
     st.subheader("Assets")
-
     assets_edit = st.data_editor(
         st.session_state.assets,
         num_rows="dynamic",
@@ -323,14 +455,11 @@ with c_assets:
         },
     )
     st.session_state.assets = sanitize_assets(assets_edit)
-
-    # totals under each
     assets_gbp2 = convert_to_gbp(st.session_state.assets, "Currency", "Balance (native)", usd_to_gbp)
     st.caption(f"Total Assets (GBP): {fmt_gbp(float(assets_gbp2.sum()))}")
 
 with c_cards:
     st.subheader("Credit Cards")
-
     cards_edit = st.data_editor(
         st.session_state.cards,
         num_rows="dynamic",
@@ -354,7 +483,6 @@ with c_cards:
 
 with c_reimb:
     st.subheader("Reimbursement Pending")
-
     reimb_edit = st.data_editor(
         st.session_state.reimb,
         num_rows="dynamic",
@@ -367,18 +495,16 @@ with c_reimb:
         },
     )
     st.session_state.reimb = sanitize_reimb(reimb_edit)
-
     included = float(st.session_state.reimb.loc[st.session_state.reimb["Include?"] == True, "Amount (GBP)"].sum())
     st.caption(f"Included Reimbursements (GBP): {fmt_gbp(included)}")
 
 st.divider()
 
-# SECOND ROW: Monthly Fixed (LEFT) + Pay Cycle (RIGHT)
+# SECOND ROW: Monthly Fixed LEFT, Pay Cycle RIGHT
 left, right = st.columns([2, 1])
 
 with left:
     st.subheader("Monthly Fixed")
-
     fixed_edit = st.data_editor(
         st.session_state.fixed,
         num_rows="dynamic",
@@ -391,7 +517,6 @@ with left:
         },
     )
     st.session_state.fixed = sanitize_fixed(fixed_edit)
-
     fixed_due2 = float(st.session_state.fixed.loc[st.session_state.fixed["Due?"] == True, "Amount (GBP)"].sum())
     fixed_all2 = float(st.session_state.fixed["Amount (GBP)"].sum())
     st.caption(f"Fixed due (GBP): {fmt_gbp(fixed_due2)} · Fixed total (GBP): {fmt_gbp(fixed_all2)}")
@@ -413,11 +538,10 @@ with right:
 
 st.divider()
 
-# FX SECTION (BOTTOM) — requested
+# FX BOTTOM
 st.subheader("FX (USD → GBP)")
 
 fx_left, fx_right = st.columns([2, 1])
-
 with fx_left:
     st.toggle("Use live FX (updates every ~30 min)", key="use_live_fx")
     if st.session_state.use_live_fx and live_fx is None:
