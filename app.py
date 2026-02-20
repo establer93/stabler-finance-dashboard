@@ -8,132 +8,115 @@ st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 st.title("Stabler Family Finances")
 
 # -------------------------
-# Supabase config (from Streamlit Secrets)
+# Supabase config
 # -------------------------
-SUPABASE_URL = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL", ""))
-SUPABASE_SERVICE_ROLE_KEY = st.secrets.get(
-    "SUPABASE_SERVICE_ROLE_KEY", os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-)
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
 
-if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-    st.error("Missing Supabase secrets. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Streamlit Secrets.")
-    st.stop()
-
-sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # -------------------------
 # Helpers
 # -------------------------
-def money(x) -> str:
+def money(x):
     try:
         return f"£{float(x):,.2f}"
-    except Exception:
+    except:
         return "£0.00"
 
-def parse_money_cell(v) -> float:
-    """
-    Accepts: 123.45, 123,45, £123.45, 1,234.56, etc.
-    """
+def parse_money(v):
     if v is None:
         return 0.0
-    s = str(v).strip()
-    if s == "" or s.lower() in {"nan", "none"}:
-        return 0.0
-
-    s = s.replace("£", "").replace(" ", "")
-    # if both comma and dot, assume comma is thousand separator
-    if "," in s and "." in s:
-        s = s.replace(",", "")
-    else:
-        # otherwise treat comma as decimal
-        s = s.replace(",", ".")
-    s = re.sub(r"[^0-9\.\-]", "", s)
-
+    s = str(v).replace("£", "").replace(",", "").strip()
     try:
         return float(s)
-    except Exception:
+    except:
         return 0.0
 
-def normalize_money_column(df: pd.DataFrame, col: str) -> pd.Series:
-    return df[col].apply(parse_money_cell)
-
-def fetch_table(table: str) -> pd.DataFrame:
+def fetch(table):
     res = sb.table(table).select("*").execute()
-    data = res.data or []
-    return pd.DataFrame(data)
+    return pd.DataFrame(res.data if res.data else [])
 
-def upsert_rows(table: str, df: pd.DataFrame, key_cols: list[str]):
-    """
-    Upsert by id if present, else insert.
-    We keep it simple: if an 'id' column exists, we upsert the whole row.
-    """
-    if df.empty:
-        return
-
-    records = df.to_dict(orient="records")
-    sb.table(table).upsert(records).execute()
-
-def ensure_defaults():
-    # Assets defaults
-    assets = fetch_table("assets")
-    if assets.empty:
-        sb.table("assets").insert([
-            {"account": "HSBC", "balance": 0},
-            {"account": "Lloyds", "balance": 0},
-            {"account": "Apple Savings", "balance": 0},
-            {"account": "Cash", "balance": 0},
-        ]).execute()
-
-    # Credit cards defaults
-    cards = fetch_table("credit_cards")
-    if cards.empty:
-        sb.table("credit_cards").insert([
-            {"card": "Amex", "balance": 0, "due": 0, "is_due": False},
-            {"card": "Apple", "balance": 0, "due": 0, "is_due": False},
-        ]).execute()
-
-    # Fixed costs defaults (from your list)
-    fixed = fetch_table("fixed_costs")
-    if fixed.empty:
-        sb.table("fixed_costs").insert([
-            {"item": "Savings", "amount": 5000.00, "monthly": True, "due_now": True},
-            {"item": "RAC", "amount": 300.00, "monthly": True, "due_now": True},
-            {"item": "Car Loan", "amount": 480.37, "monthly": True, "due_now": True},
-            {"item": "Marchon", "amount": 133.10, "monthly": True, "due_now": True},
-            {"item": "Utilities", "amount": 425.00, "monthly": True, "due_now": True},
-            {"item": "Eric Vodafone", "amount": 38.00, "monthly": True, "due_now": True},
-            {"item": "Eric Haircut", "amount": 35.00, "monthly": True, "due_now": True},
-            {"item": "Eric iphone", "amount": 35.11, "monthly": True, "due_now": True},
-            {"item": "Cleaning", "amount": 72.00, "monthly": True, "due_now": True},
-            {"item": "Gigi Vodafone", "amount": 38.00, "monthly": True, "due_now": True},
-            {"item": "Gigi Gym", "amount": 79.00, "monthly": True, "due_now": True},
-            {"item": "Caroline Circuits", "amount": 35.00, "monthly": True, "due_now": True},
-            {"item": "Gigi Charity", "amount": 12.00, "monthly": True, "due_now": True},
-            {"item": "G+ E Contacts", "amount": 95.00, "monthly": True, "due_now": True},
-        ]).execute()
-
-    # Reimbursements defaults
-    reimb = fetch_table("reimbursements")
-    if reimb.empty:
-        sb.table("reimbursements").insert([
-            {"item": "Eric Work", "amount": 0, "include": True},
-            {"item": "Gigi Work", "amount": 0, "include": True},
-            {"item": "Misc", "amount": 0, "include": False},
-        ]).execute()
-
-# Make sure tables have starter rows
-ensure_defaults()
+def save(table, df):
+    if not df.empty:
+        sb.table(table).upsert(df.to_dict(orient="records")).execute()
 
 # -------------------------
-# Load tables
+# Ensure default data
 # -------------------------
-assets = fetch_table("assets")
-cards = fetch_table("credit_cards")
-reimb = fetch_table("reimbursements")
-fixed = fetch_table("fixed_costs")
+if fetch("assets").empty:
+    sb.table("assets").insert([
+        {"account": "HSBC", "balance": 0},
+        {"account": "Lloyds", "balance": 0},
+        {"account": "Apple Savings", "balance": 0},
+        {"account": "Cash", "balance": 0},
+    ]).execute()
 
-# Ensure expected columns (safety)
-for df, required in [
-    (assets, ["id", "account", "balance"]),
-    (cards, ["id", "card", "balance", "due", "is_due"]),
-    (re
+if fetch("credit_cards").empty:
+    sb.table("credit_cards").insert([
+        {"card": "Amex", "balance": 0, "due": 0, "is_due": False},
+        {"card": "Apple", "balance": 0, "due": 0, "is_due": False},
+    ]).execute()
+
+if fetch("reimbursements").empty:
+    sb.table("reimbursements").insert([
+        {"item": "Eric Work", "amount": 0, "include": True},
+        {"item": "Gigi Work", "amount": 0, "include": True},
+        {"item": "Misc", "amount": 0, "include": False},
+    ]).execute()
+
+# -------------------------
+# Load data
+# -------------------------
+assets = fetch("assets")
+cards = fetch("credit_cards")
+reimb = fetch("reimbursements")
+fixed = fetch("fixed_costs")
+
+# -------------------------
+# Top calculations
+# -------------------------
+assets_total = assets["balance"].sum() if not assets.empty else 0
+cards_balance_total = cards["balance"].sum() if not cards.empty else 0
+cards_due_total = cards["due"].sum() if not cards.empty else 0
+
+net_cash = assets_total - cards_balance_total
+
+m1, m2, m3 = st.columns(3)
+m1.metric("Net Cash", money(net_cash))
+m2.metric("Total Credit Card Bill Due", money(cards_due_total))
+m3.metric("Total Spend Rest of Month", money(cards_due_total))
+
+st.divider()
+
+# -------------------------
+# Layout
+# -------------------------
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    st.subheader("Assets")
+    edited = st.data_editor(assets, use_container_width=True)
+    edited["balance"] = edited["balance"].apply(parse_money)
+    save("assets", edited)
+
+with col2:
+    st.subheader("Credit Cards")
+    edited = st.data_editor(cards, use_container_width=True)
+    edited["balance"] = edited["balance"].apply(parse_money)
+    edited["due"] = edited["due"].apply(parse_money)
+    save("credit_cards", edited)
+
+with col3:
+    st.subheader("Reimbursement Pending")
+    edited = st.data_editor(reimb, use_container_width=True)
+    edited["amount"] = edited["amount"].apply(parse_money)
+    save("reimbursements", edited)
+
+st.divider()
+
+st.subheader("Monthly Fixed")
+edited = st.data_editor(fixed, use_container_width=True)
+if not edited.empty and "amount" in edited.columns:
+    edited["amount"] = edited["amount"].apply(parse_money)
+    save("fixed_costs", edited)
