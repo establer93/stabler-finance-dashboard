@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from pathlib import Path
 import re
+import json
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 st.title("Stabler Family Finances")
@@ -94,8 +95,70 @@ def parse_money_cell(v) -> float:
 def normalize_money_column(df: pd.DataFrame, col: str) -> pd.Series:
     return df[col].apply(parse_money_cell)
 
+def df_to_records(df: pd.DataFrame) -> list[dict]:
+    # Ensure JSON serializable values
+    return json.loads(df.to_json(orient="records"))
+
+def records_to_df(records: list[dict], cols: list[str]) -> pd.DataFrame:
+    df = pd.DataFrame(records)
+    # Ensure all cols exist
+    for c in cols:
+        if c not in df.columns:
+            df[c] = None
+    return df[cols].copy()
+
 # -------------------------
-# Load data
+# Backup / Restore (single JSON file)
+# -------------------------
+assets0 = load_df("assets")
+cards0 = load_df("cards")
+reimb0 = load_df("reimb")
+fixed0 = load_df("fixed")
+
+backup_payload = {
+    "version": 1,
+    "assets": df_to_records(assets0),
+    "cards": df_to_records(cards0),
+    "reimb": df_to_records(reimb0),
+    "fixed": df_to_records(fixed0),
+}
+
+backup_json = json.dumps(backup_payload, indent=2)
+
+with st.expander("Backup / Restore", expanded=False):
+    st.download_button(
+        label="Download backup.json",
+        data=backup_json,
+        file_name="stabler_finances_backup.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+
+    uploaded = st.file_uploader("Restore from backup.json", type=["json"])
+    if uploaded is not None:
+        try:
+            payload = json.loads(uploaded.read().decode("utf-8"))
+
+            # Rebuild DFs using expected schemas
+            a = records_to_df(payload.get("assets", []), FILES["assets"][1])
+            c = records_to_df(payload.get("cards", []), FILES["cards"][1])
+            r = records_to_df(payload.get("reimb", []), FILES["reimb"][1])
+            f = records_to_df(payload.get("fixed", []), FILES["fixed"][1])
+
+            save_df("assets", a)
+            save_df("cards", c)
+            save_df("reimb", r)
+            save_df("fixed", f)
+
+            st.success("Restored ✅ Refreshing…")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Couldn’t restore backup: {e}")
+
+st.divider()
+
+# -------------------------
+# Load data for app sections
 # -------------------------
 assets = load_df("assets")
 cards = load_df("cards")
@@ -106,6 +169,7 @@ cards["is_due"] = to_bool(cards["is_due"]) if "is_due" in cards.columns else Fal
 reimb["include"] = to_bool(reimb["include"]) if "include" in reimb.columns else False
 fixed["is_due"] = to_bool(fixed["is_due"]) if "is_due" in fixed.columns else False
 
+# Convert money cols to strings for editing (iPad-safe)
 for df, col in [
     (assets, "balance"),
     (cards, "balance"),
@@ -117,7 +181,7 @@ for df, col in [
         df[col] = df[col].fillna("").astype(str)
 
 # -------------------------
-# TOP ROW
+# TOP ROW: Assets | Credit Cards | Reimbursement Pending
 # -------------------------
 col1, col2, col3 = st.columns(3)
 
@@ -128,9 +192,7 @@ with col1:
         key="assets_editor",
         num_rows="dynamic",
         use_container_width=True,
-        column_config={
-            "balance": st.column_config.TextColumn("Balance (£)")
-        },
+        column_config={"balance": st.column_config.TextColumn("Balance (£)")},
     )
 
     assets_out = assets_edit.copy()
