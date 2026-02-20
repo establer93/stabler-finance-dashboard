@@ -1,4 +1,16 @@
 import streamlit as st
+
+st.title("Secret Debug")
+
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
+SUPABASE_KEY = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "")
+
+st.write("URL exists:", SUPABASE_URL != "")
+st.write("URL starts with https:", SUPABASE_URL.startswith("https"))
+
+st.write("Key exists:", SUPABASE_KEY != "")
+st.write("Key prefix:", SUPABASE_KEY[:10])
+st.write("Key length:", len(SUPABASE_KEY))import streamlit as st
 import pandas as pd
 from supabase import create_client
 
