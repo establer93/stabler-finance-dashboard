@@ -1,0 +1,7 @@
+item,amount,is_due
+RAC,0,TRUE
+Car Loan,0,TRUE
+Utilities,0,TRUE
+Gym,0,TRUE
+Subscriptions,0,TRUE
+Other,0,FALSE
