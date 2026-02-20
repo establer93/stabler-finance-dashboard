@@ -11,12 +11,8 @@ st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 # ----------------------------
 # FX (live) – Frankfurter (ECB-based, no key)
 # ----------------------------
-@st.cache_data(ttl=60 * 60)  # cache for 1 hour
+@st.cache_data(ttl=60 * 60)
 def get_fx_rate(frm: str, to: str) -> float:
-    """
-    Returns latest FX rate for frm->to using Frankfurter.
-    Updated daily on business days (ECB reference rates).
-    """
     frm = frm.upper()
     to = to.upper()
     if frm == to:
@@ -24,13 +20,9 @@ def get_fx_rate(frm: str, to: str) -> float:
     url = f"https://api.frankfurter.dev/v1/latest?base={frm}&symbols={to}"
     r = requests.get(url, timeout=15)
     r.raise_for_status()
-    data = r.json()
-    return float(data["rates"][to])
+    return float(r.json()["rates"][to])
 
 def parse_money_text(v) -> float:
-    """
-    Accepts: 123.45, 123,45, £123.45, 1,234.56, -12.34 etc.
-    """
     if v is None:
         return 0.0
     s = str(v).strip()
@@ -65,7 +57,6 @@ DEFAULT_ASSETS = pd.DataFrame(
     ]
 )
 
-# Added currency column; set Apple card to USD by default
 DEFAULT_CARDS = pd.DataFrame(
     [
         {"card": "Amex", "currency": "GBP", "balance": "0", "due_this_cycle": "0", "is_due": False},
@@ -79,16 +70,6 @@ DEFAULT_FIXED = pd.DataFrame(
         {"item": "RAC", "amount": "300.00", "due": True},
         {"item": "Car Loan", "amount": "480.37", "due": True},
         {"item": "Marchon", "amount": "133.10", "due": True},
-        {"item": "Utilities", "amount": "425.00", "due": True},
-        {"item": "Eric Vodafone", "amount": "38.00", "due": True},
-        {"item": "Eric Haircut", "amount": "35.00", "due": True},
-        {"item": "Eric iphone", "amount": "35.11", "due": True},
-        {"item": "Cleaning", "amount": "72.00", "due": True},
-        {"item": "Gigi Vodafone", "amount": "38.00", "due": True},
-        {"item": "Gigi Gym", "amount": "79.00", "due": True},
-        {"item": "Caroline Circuits", "amount": "35.00", "due": True},
-        {"item": "Gigi Charity", "amount": "12.00", "due": True},
-        {"item": "G+ E Contacts", "amount": "95.00", "due": True},
     ]
 )
 
@@ -100,16 +81,6 @@ DEFAULT_REIMB = pd.DataFrame(
     ]
 )
 
-DEFAULT_PAY = pd.DataFrame(
-    [
-        {"person": "Eric", "monthly_pay": "0"},
-        {"person": "Gigi", "monthly_pay": "0"},
-    ]
-)
-
-# ----------------------------
-# Session state init
-# ----------------------------
 def init_state():
     if "assets" not in st.session_state:
         st.session_state.assets = DEFAULT_ASSETS.copy()
@@ -119,140 +90,60 @@ def init_state():
         st.session_state.fixed = DEFAULT_FIXED.copy()
     if "reimb" not in st.session_state:
         st.session_state.reimb = DEFAULT_REIMB.copy()
-    if "pay" not in st.session_state:
-        st.session_state.pay = DEFAULT_PAY.copy()
-
-def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8")
-
-def make_backup_zip() -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
-        z.writestr("assets.csv", df_to_csv_bytes(st.session_state.assets))
-        z.writestr("credit_cards.csv", df_to_csv_bytes(st.session_state.cards))
-        z.writestr("fixed_costs.csv", df_to_csv_bytes(st.session_state.fixed))
-        z.writestr("reimbursements.csv", df_to_csv_bytes(st.session_state.reimb))
-        z.writestr("pay_cycle.csv", df_to_csv_bytes(st.session_state.pay))
-    buf.seek(0)
-    return buf.read()
-
-def load_backup_zip(zip_bytes: bytes):
-    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as z:
-        names = set(z.namelist())
-
-        def read_df(name, default_df):
-            if name in names:
-                return pd.read_csv(z.open(name))
-            return default_df.copy()
-
-        st.session_state.assets = read_df("assets.csv", DEFAULT_ASSETS)
-        st.session_state.cards = read_df("credit_cards.csv", DEFAULT_CARDS)
-        st.session_state.fixed = read_df("fixed_costs.csv", DEFAULT_FIXED)
-        st.session_state.reimb = read_df("reimbursements.csv", DEFAULT_REIMB)
-        st.session_state.pay = read_df("pay_cycle.csv", DEFAULT_PAY)
+    if "manual_usd_gbp" not in st.session_state:
+        st.session_state.manual_usd_gbp = "0.80"
 
 init_state()
 
 # ----------------------------
-# Sidebar Save/Load
+# Live FX (calculated silently)
 # ----------------------------
-with st.sidebar:
-    st.header("Save / Load")
-
-    backup_name = f"stabler-finances-backup-{date.today().isoformat()}.zip"
-    st.download_button(
-        label="⬇️ Download backup (ZIP)",
-        data=make_backup_zip(),
-        file_name=backup_name,
-        mime="application/zip",
-        use_container_width=True,
-    )
-
-    uploaded = st.file_uploader("⬆️ Restore from backup (ZIP)", type=["zip"])
-    if uploaded is not None:
-        try:
-            load_backup_zip(uploaded.read())
-            st.success("Backup restored.")
-        except Exception as e:
-            st.error(f"Couldn’t load that ZIP: {e}")
-
-    st.divider()
-    if st.button("Reset to defaults", use_container_width=True):
-        st.session_state.assets = DEFAULT_ASSETS.copy()
-        st.session_state.cards = DEFAULT_CARDS.copy()
-        st.session_state.fixed = DEFAULT_FIXED.copy()
-        st.session_state.reimb = DEFAULT_REIMB.copy()
-        st.session_state.pay = DEFAULT_PAY.copy()
-        st.success("Reset done.")
-
-# ----------------------------
-# Main app
-# ----------------------------
-st.title("Stabler Family Finances")
-
-# Live FX (USD->GBP). If it fails, fall back to a manual value you can edit.
-fx_col1, fx_col2 = st.columns([2, 1])
-with fx_col1:
-    st.subheader("FX")
-    st.caption("Apple Card is in USD. We convert USD → GBP using a live mid-market reference rate (ECB/Frankfurter).")
-with fx_col2:
-    manual_fx = st.session_state.get("manual_usd_gbp", 0.80)
-    st.session_state.manual_usd_gbp = st.text_input("Manual USD→GBP (fallback)", value=str(manual_fx))
-
 try:
     usd_gbp = get_fx_rate("USD", "GBP")
     fx_source = "live"
-except Exception:
+except:
     usd_gbp = parse_money_text(st.session_state.manual_usd_gbp)
-    fx_source = "manual (live failed)"
+    fx_source = "manual"
 
-st.write(f"**USD→GBP rate:** `{usd_gbp:.6f}`  _(source: {fx_source})_")
-
-# Convert text -> numeric for calculations
+# ----------------------------
+# Calculations
+# ----------------------------
 assets_num = coerce_numeric(st.session_state.assets.copy(), ["balance"])
 cards_num = st.session_state.cards.copy()
-# Ensure currency col exists
+
 if "currency" not in cards_num.columns:
     cards_num["currency"] = "GBP"
-cards_num["currency"] = cards_num["currency"].fillna("GBP").astype(str).str.upper()
 
+cards_num["currency"] = cards_num["currency"].fillna("GBP").astype(str).str.upper()
 cards_num = coerce_numeric(cards_num, ["balance", "due_this_cycle"])
 
-fixed_num = coerce_numeric(st.session_state.fixed.copy(), ["amount"])
-reimb_num = coerce_numeric(st.session_state.reimb.copy(), ["amount"])
-
-# Convert card amounts to GBP for totals
-def to_gbp(amount: float, currency: str) -> float:
+def to_gbp(amount, currency):
     if currency == "USD":
         return amount * usd_gbp
-    return amount  # assume GBP otherwise
+    return amount
 
-cards_num["balance_gbp"] = cards_num.apply(lambda r: to_gbp(float(r["balance"]), r["currency"]), axis=1)
-cards_num["due_gbp"] = cards_num.apply(lambda r: to_gbp(float(r["due_this_cycle"]), r["currency"]), axis=1)
+cards_num["balance_gbp"] = cards_num.apply(lambda r: to_gbp(r["balance"], r["currency"]), axis=1)
+cards_num["due_gbp"] = cards_num.apply(lambda r: to_gbp(r["due_this_cycle"], r["currency"]), axis=1)
 
-assets_total = float(assets_num["balance"].sum()) if "balance" in assets_num else 0.0
-card_bal_total_gbp = float(cards_num["balance_gbp"].sum()) if "balance_gbp" in cards_num else 0.0
+assets_total = float(assets_num["balance"].sum())
+card_balance_total = float(cards_num["balance_gbp"].sum())
+card_due_total = float(cards_num.loc[cards_num["is_due"] == True, "due_gbp"].sum())
 
-card_due_total_gbp = 0.0
-if "is_due" in cards_num.columns and "due_gbp" in cards_num.columns:
-    card_due_total_gbp = float(cards_num.loc[cards_num["is_due"] == True, "due_gbp"].sum())
+net_cash = assets_total - card_balance_total
+total_spend_rest = card_due_total
 
-fixed_due_total = 0.0
-if "due" in fixed_num.columns and "amount" in fixed_num.columns:
-    fixed_due_total = float(fixed_num.loc[fixed_num["due"] == True, "amount"].sum())
+# ----------------------------
+# UI
+# ----------------------------
+st.title("Stabler Family Finances")
 
-net_cash = assets_total - card_bal_total_gbp
-total_spend_rest_of_month = fixed_due_total + card_due_total_gbp
-
-# ---- Top KPI row
 k1, k2, k3 = st.columns(3)
 k1.metric("Net Cash", f"£{net_cash:,.2f}")
-k2.metric("Total Credit Card Bill Due (GBP)", f"£{card_due_total_gbp:,.2f}")
-k3.metric("Total Spend Rest of Month (GBP)", f"£{total_spend_rest_of_month:,.2f}")
+k2.metric("Total Credit Card Bill Due (GBP)", f"£{card_due_total:,.2f}")
+k3.metric("Total Spend Rest of Month (GBP)", f"£{total_spend_rest:,.2f}")
 
 st.markdown("---")
 
-# ---- Tables row
 c1, c2, c3 = st.columns(3)
 
 with c1:
@@ -262,10 +153,9 @@ with c1:
         num_rows="dynamic",
         use_container_width=True,
         column_config={
-            "account": st.column_config.TextColumn("account"),
+            "account": st.column_config.TextColumn("Account"),
             "balance": st.column_config.TextColumn("Balance (£)"),
         },
-        key="assets_editor",
     )
 
 with c2:
@@ -275,31 +165,13 @@ with c2:
         num_rows="dynamic",
         use_container_width=True,
         column_config={
-            "card": st.column_config.TextColumn("card"),
-            "currency": st.column_config.SelectboxColumn(
-                "Currency",
-                options=["GBP", "USD"],
-                required=True,
-            ),
+            "card": st.column_config.TextColumn("Card"),
+            "currency": st.column_config.SelectboxColumn("Currency", options=["GBP", "USD"]),
             "balance": st.column_config.TextColumn("Balance (native)"),
-            "due_this_cycle": st.column_config.TextColumn("Due this cycle (native)"),
+            "due_this_cycle": st.column_config.TextColumn("Due (native)"),
             "is_due": st.column_config.CheckboxColumn("Due?"),
         },
-        key="cards_editor",
     )
-
-    # Small helper display: converted view
-    st.caption("Converted view (for totals)")
-    show_cards = cards_num[["card", "currency", "balance", "balance_gbp", "due_this_cycle", "due_gbp", "is_due"]].copy()
-    show_cards = show_cards.rename(
-        columns={
-            "balance": "Balance (native)",
-            "balance_gbp": "Balance (GBP)",
-            "due_this_cycle": "Due (native)",
-            "due_gbp": "Due (GBP)",
-        }
-    )
-    st.dataframe(show_cards, use_container_width=True, hide_index=True)
 
 with c3:
     st.subheader("Reimbursement Pending")
@@ -312,36 +184,24 @@ with c3:
             "amount": st.column_config.TextColumn("Amount (£)"),
             "include_this_month": st.column_config.CheckboxColumn("Include?"),
         },
-        key="reimb_editor",
     )
 
 st.markdown("---")
 
-left, right = st.columns([2, 1])
+# ----------------------------
+# FX Section (moved to bottom)
+# ----------------------------
+st.subheader("FX Settings (Apple Card USD Conversion)")
+st.caption("USD balances are converted to GBP using ECB reference rates via Frankfurter.")
 
-with left:
-    st.subheader("Monthly Fixed")
-    st.session_state.fixed = st.data_editor(
-        st.session_state.fixed,
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "item": st.column_config.TextColumn("item"),
-            "amount": st.column_config.TextColumn("Amount (£)"),
-            "due": st.column_config.CheckboxColumn("Due?"),
-        },
-        key="fixed_editor",
-    )
+col1, col2 = st.columns([2, 1])
 
-with right:
-    st.subheader("Pay Cycle (setup)")
-    st.session_state.pay = st.data_editor(
-        st.session_state.pay,
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "person": st.column_config.TextColumn("Person"),
-            "monthly_pay": st.column_config.TextColumn("Monthly pay (£)"),
-        },
-        key="pay_editor",
+with col1:
+    st.write(f"**Current USD→GBP rate:** `{usd_gbp:.6f}`")
+    st.write(f"Source: {fx_source}")
+
+with col2:
+    st.session_state.manual_usd_gbp = st.text_input(
+        "Manual fallback USD→GBP",
+        value=st.session_state.manual_usd_gbp,
     )
