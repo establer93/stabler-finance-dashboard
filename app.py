@@ -29,7 +29,6 @@ def ensure_file(filename: str, cols: list[str], default_df: pd.DataFrame | None 
     if path.exists():
         return
     if default_df is not None:
-        # Ensure correct column order
         out = default_df.copy()
         for c in cols:
             if c not in out.columns:
@@ -72,9 +71,6 @@ def to_bool(series: pd.Series) -> pd.Series:
     return s.fillna(False).astype(bool)
 
 def parse_money_cell(v) -> float:
-    """
-    Accepts: 123.45, 123,45, £123.45, 1,234.56, etc.
-    """
     if v is None:
         return 0.0
     s = str(v).strip()
@@ -106,12 +102,10 @@ cards = load_df("cards")
 reimb = load_df("reimb")
 fixed = load_df("fixed")
 
-# Ensure boolean cols behave
 cards["is_due"] = to_bool(cards["is_due"]) if "is_due" in cards.columns else False
 reimb["include"] = to_bool(reimb["include"]) if "include" in reimb.columns else False
 fixed["is_due"] = to_bool(fixed["is_due"]) if "is_due" in fixed.columns else False
 
-# Convert money cols to strings for editing (iPad-safe)
 for df, col in [
     (assets, "balance"),
     (cards, "balance"),
@@ -123,7 +117,7 @@ for df, col in [
         df[col] = df[col].fillna("").astype(str)
 
 # -------------------------
-# TOP ROW: Assets | Credit Cards | Reimbursement Pending
+# TOP ROW
 # -------------------------
 col1, col2, col3 = st.columns(3)
 
@@ -135,7 +129,7 @@ with col1:
         num_rows="dynamic",
         use_container_width=True,
         column_config={
-            "balance": st.column_config.TextColumn("Balance (£)", help="Type e.g. 123.45")
+            "balance": st.column_config.TextColumn("Balance (£)")
         },
     )
 
@@ -154,8 +148,8 @@ with col2:
         num_rows="dynamic",
         use_container_width=True,
         column_config={
-            "balance": st.column_config.TextColumn("Balance (£)", help="Type e.g. 123.45"),
-            "due": st.column_config.TextColumn("Bill due this cycle (£)", help="Type e.g. 123.45"),
+            "balance": st.column_config.TextColumn("Balance (£)"),
+            "due": st.column_config.TextColumn("Bill due this cycle (£)"),
             "is_due": st.column_config.CheckboxColumn("Due?"),
         },
     )
@@ -172,14 +166,13 @@ with col2:
 
 with col3:
     st.subheader("Reimbursement Pending")
-    st.caption("Track work reimbursements + misc items. Toggle Include if you want it counted this month.")
     reimb_edit = st.data_editor(
         reimb,
         key="reimb_editor",
-        num_rows="fixed",  # keep exactly 3 rows unless you edit the CSV
+        num_rows="fixed",
         use_container_width=True,
         column_config={
-            "amount": st.column_config.TextColumn("Amount (£)", help="Type e.g. 123.45"),
+            "amount": st.column_config.TextColumn("Amount (£)"),
             "include": st.column_config.CheckboxColumn("Include this month?"),
         },
     )
@@ -200,7 +193,6 @@ st.divider()
 net_cash = assets_total - cards_total_balance
 cards_due_now = float(cards_out.loc[cards_out["is_due"] == True, "due"].sum()) if not cards_out.empty else 0.0
 
-# Fixed due will be calculated after the editor below
 fixed_due_total = 0.0
 total_spend_rest_month = fixed_due_total + reimb_total + cards_due_now
 
@@ -211,9 +203,6 @@ m3.metric("Total Spend Rest of Month", money(total_spend_rest_month))
 
 st.divider()
 
-# -------------------------
-# Monthly Fixed (supports totals)
-# -------------------------
 with st.expander("Monthly Fixed (Used in totals)", expanded=True):
     fixed_edit = st.data_editor(
         fixed,
@@ -221,7 +210,7 @@ with st.expander("Monthly Fixed (Used in totals)", expanded=True):
         num_rows="dynamic",
         use_container_width=True,
         column_config={
-            "amount": st.column_config.TextColumn("Amount (£)", help="Type e.g. 123.45"),
+            "amount": st.column_config.TextColumn("Amount (£)"),
             "is_due": st.column_config.CheckboxColumn("Due this month?"),
         },
     )
