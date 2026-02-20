@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 from pathlib import Path
+from datetime import date, datetime, timedelta
+import calendar
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 st.title("Stabler Family Finances")
@@ -9,6 +11,7 @@ FILES = {
     "assets": ("assets.csv", ["account", "balance"]),
     "cards": ("credit_cards.csv", ["card", "balance", "due", "is_due"]),
     "fixed": ("fixed_costs.csv", ["item", "amount", "is_due"]),
+    "pay": ("pay_cycle.csv", ["person", "rule", "pay_day", "amount", "buffer"]),
 }
 
 def ensure_file(filename: str, cols: list[str]) -> None:
@@ -26,7 +29,7 @@ def load_df(key: str) -> pd.DataFrame:
             df[c] = None
 
     df = df[cols].copy()
-    df = df.dropna(how="all")  # remove fully empty rows if any
+    df = df.dropna(how="all")
     return df
 
 def save_df(key: str, df: pd.DataFrame) -> None:
@@ -45,10 +48,63 @@ def to_number(series: pd.Series) -> pd.Series:
 def to_bool(series: pd.Series) -> pd.Series:
     return series.fillna(False).astype(bool)
 
+def is_weekend(d: date) -> bool:
+    return d.weekday() >= 5  # 5=Sat, 6=Sun
+
+def previous_business_day(d: date) -> date:
+    # Move back to Friday if weekend
+    while is_weekend(d):
+        d = d - timedelta(days=1)
+    return d
+
+def last_day_of_month(year: int, month: int) -> date:
+    last = calendar.monthrange(year, month)[1]
+    return date(year, month, last)
+
+def next_pay_date_fixed_day(day_of_month: int, today: date) -> date:
+    # Candidate in current month
+    year, month = today.year, today.month
+    last = calendar.monthrange(year, month)[1]
+    dom = min(day_of_month, last)
+    candidate = date(year, month, dom)
+    candidate = previous_business_day(candidate)
+
+    # If already passed (strictly < today), go to next month
+    if candidate < today:
+        if month == 12:
+            year, month = year + 1, 1
+        else:
+            month += 1
+        last = calendar.monthrange(year, month)[1]
+        dom = min(day_of_month, last)
+        candidate = date(year, month, dom)
+        candidate = previous_business_day(candidate)
+
+    return candidate
+
+def next_pay_date_end_of_month(today: date) -> date:
+    year, month = today.year, today.month
+    candidate = last_day_of_month(year, month)
+    candidate = previous_business_day(candidate)
+
+    if candidate < today:
+        if month == 12:
+            year, month = year + 1, 1
+        else:
+            month += 1
+        candidate = last_day_of_month(year, month)
+        candidate = previous_business_day(candidate)
+
+    return candidate
+
+def days_until(d: date, today: date) -> int:
+    return (d - today).days
+
 # ---- Load data ----
 assets = load_df("assets")
 cards = load_df("cards")
 fixed = load_df("fixed")
+pay = load_df("pay")
 
 # ---- Clean types ----
 assets["balance"] = to_number(assets["balance"])
@@ -58,7 +114,15 @@ cards["is_due"] = to_bool(cards["is_due"])
 fixed["amount"] = to_number(fixed["amount"])
 fixed["is_due"] = to_bool(fixed["is_due"])
 
-# ---- Top row: Assets | Cards | Overview ----
+# Pay table types
+pay["amount"] = to_number(pay["amount"]) if not pay.empty else pay.get("amount", pd.Series(dtype=float))
+pay["buffer"] = to_number(pay["buffer"]) if not pay.empty else pay.get("buffer", pd.Series(dtype=float))
+if "pay_day" in pay.columns:
+    pay["pay_day"] = pd.to_numeric(pay["pay_day"], errors="coerce")
+
+today = date.today()
+
+# ---- Layout: Top row ----
 c1, c2, c3 = st.columns([1, 1, 1])
 
 with c1:
@@ -89,20 +153,42 @@ with c2:
         },
     )
     save_df("cards", cards_edit)
-
     cards_total = float(cards_edit["balance"].sum()) if not cards_edit.empty else 0.0
     cards_due = float(cards_edit.loc[cards_edit["is_due"] == True, "due"].sum()) if not cards_edit.empty else 0.0
 
 with c3:
-    st.subheader("Cash & Due Overview")
+    st.subheader("Pay Cycle (setup)")
+    st.caption("Enter monthly take-home pay + optional buffer. Dates auto-calc.")
 
-    # Monthly fixed gets calculated later; placeholder for now
-    # We'll compute properly after fixed section, but we can show partials now
-    st.caption("Scroll down for full due item list 👇")
+    # Ensure pay has at least Eric + Gigi rows if blank
+    if pay.empty:
+        pay = pd.DataFrame([
+            {"person": "Eric", "rule": "fixed_day", "pay_day": 24, "amount": 0, "buffer": 0},
+            {"person": "Gigi", "rule": "end_of_month", "pay_day": None, "amount": 0, "buffer": 0},
+        ])
+
+    pay_edit = st.data_editor(
+        pay,
+        key="pay_editor",
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "person": st.column_config.TextColumn("Person"),
+            "rule": st.column_config.SelectboxColumn(
+                "Rule",
+                options=["fixed_day", "end_of_month"],
+                help="fixed_day = paid on a day-of-month (weekend -> previous business day). end_of_month = last day (weekend -> previous business day).",
+            ),
+            "pay_day": st.column_config.NumberColumn("Pay day (if fixed)", help="Used only for rule=fixed_day"),
+            "amount": st.column_config.NumberColumn("Monthly pay", format="£%.2f"),
+            "buffer": st.column_config.NumberColumn("Buffer", format="£%.2f"),
+        },
+    )
+    save_df("pay", pay_edit)
 
 st.divider()
 
-# ---- Second row: Monthly Fixed | Overview + Due Items ----
+# ---- Second row: Monthly Fixed | Overview ----
 left, right = st.columns([1.3, 0.7])
 
 with left:
@@ -156,3 +242,71 @@ with right:
         if not due_fixed_df.empty:
             st.write("**Fixed due:**")
             st.dataframe(due_fixed_df[["item", "amount"]], use_container_width=True)
+
+st.divider()
+
+# ---- Pay Cycle Forecast (full panel) ----
+st.subheader("Pay Cycle Forecast")
+
+pay_rows = []
+total_income_before_next = 0.0
+total_buffer = 0.0
+
+pay_clean = pay_edit.copy()
+pay_clean["amount"] = to_number(pay_clean["amount"])
+pay_clean["buffer"] = to_number(pay_clean["buffer"])
+pay_clean["pay_day"] = pd.to_numeric(pay_clean["pay_day"], errors="coerce")
+
+for _, row in pay_clean.iterrows():
+    person = str(row.get("person", "")).strip() or "Person"
+    rule = str(row.get("rule", "fixed_day")).strip()
+    amt = float(row.get("amount", 0.0))
+    buf = float(row.get("buffer", 0.0))
+    pay_day = row.get("pay_day", None)
+
+    if rule == "end_of_month":
+        next_pay = next_pay_date_end_of_month(today)
+    else:
+        # default fixed_day
+        dom = int(pay_day) if pd.notna(pay_day) else 24
+        next_pay = next_pay_date_fixed_day(dom, today)
+
+    d_left = days_until(next_pay, today)
+
+    pay_rows.append({
+        "Person": person,
+        "Rule": rule,
+        "Next pay date": next_pay.isoformat(),
+        "Days remaining": d_left,
+        "Monthly pay": amt,
+        "Buffer": buf,
+    })
+
+# Determine the *earliest* upcoming pay date across both of you
+pay_df = pd.DataFrame(pay_rows)
+if not pay_df.empty:
+    pay_df["Next pay date"] = pd.to_datetime(pay_df["Next pay date"]).dt.date
+    earliest_pay_date = min(pay_df["Next pay date"])
+    # Income expected before or on that earliest pay date:
+    income_before = pay_df.loc[pay_df["Next pay date"] == earliest_pay_date, "Monthly pay"].sum()
+    buffer_before = pay_df.loc[pay_df["Next pay date"] == earliest_pay_date, "Buffer"].sum()
+else:
+    earliest_pay_date = None
+    income_before = 0.0
+    buffer_before = 0.0
+
+# Forecast: current cash position + incoming pay (+buffer) - due now
+forecast_after_due = cash_position + income_before + buffer_before - due_now
+
+cA, cB, cC, cD = st.columns(4)
+if earliest_pay_date:
+    cA.metric("Next pay event", earliest_pay_date.strftime("%Y-%m-%d"))
+    cB.metric("Days to next pay", str((earliest_pay_date - today).days))
+else:
+    cA.metric("Next pay event", "—")
+    cB.metric("Days to next pay", "—")
+
+cC.metric("Income before next pay", money(income_before))
+cD.metric("Forecast (after paying Due now)", money(forecast_after_due))
+
+st.dataframe(pay_df, use_container_width=True)
