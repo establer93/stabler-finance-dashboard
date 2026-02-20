@@ -3,11 +3,58 @@ import zipfile
 from datetime import date
 import pandas as pd
 import streamlit as st
+import requests
+import re
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 
 # ----------------------------
-# Defaults (used if no backup uploaded yet)
+# FX (live) – Frankfurter (ECB-based, no key)
+# ----------------------------
+@st.cache_data(ttl=60 * 60)  # cache for 1 hour
+def get_fx_rate(frm: str, to: str) -> float:
+    """
+    Returns latest FX rate for frm->to using Frankfurter.
+    Updated daily on business days (ECB reference rates).
+    """
+    frm = frm.upper()
+    to = to.upper()
+    if frm == to:
+        return 1.0
+    url = f"https://api.frankfurter.dev/v1/latest?base={frm}&symbols={to}"
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    return float(data["rates"][to])
+
+def parse_money_text(v) -> float:
+    """
+    Accepts: 123.45, 123,45, £123.45, 1,234.56, -12.34 etc.
+    """
+    if v is None:
+        return 0.0
+    s = str(v).strip()
+    if s == "" or s.lower() in {"nan", "none"}:
+        return 0.0
+    s = s.replace("£", "").replace("$", "").replace(" ", "")
+    if "," in s and "." in s:
+        s = s.replace(",", "")
+    else:
+        s = s.replace(",", ".")
+    s = re.sub(r"[^0-9\.\-]", "", s)
+    try:
+        return float(s)
+    except:
+        return 0.0
+
+def coerce_numeric(df: pd.DataFrame, cols):
+    for c in cols:
+        if c in df.columns:
+            df[c] = df[c].apply(parse_money_text)
+    return df
+
+# ----------------------------
+# Defaults
 # ----------------------------
 DEFAULT_ASSETS = pd.DataFrame(
     [
@@ -18,10 +65,11 @@ DEFAULT_ASSETS = pd.DataFrame(
     ]
 )
 
+# Added currency column; set Apple card to USD by default
 DEFAULT_CARDS = pd.DataFrame(
     [
-        {"card": "Amex", "balance": "0", "due_this_cycle": "0", "is_due": False},
-        {"card": "Apple", "balance": "0", "due_this_cycle": "0", "is_due": False},
+        {"card": "Amex", "currency": "GBP", "balance": "0", "due_this_cycle": "0", "is_due": False},
+        {"card": "Apple Card", "currency": "USD", "balance": "0", "due_this_cycle": "0", "is_due": False},
     ]
 )
 
@@ -44,7 +92,6 @@ DEFAULT_FIXED = pd.DataFrame(
     ]
 )
 
-# “Reimbursement pending” with 3 rows
 DEFAULT_REIMB = pd.DataFrame(
     [
         {"source": "Eric Work", "amount": "0", "include_this_month": True},
@@ -61,7 +108,7 @@ DEFAULT_PAY = pd.DataFrame(
 )
 
 # ----------------------------
-# Helpers: in-session "database"
+# Session state init
 # ----------------------------
 def init_state():
     if "assets" not in st.session_state:
@@ -79,7 +126,6 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
 
 def make_backup_zip() -> bytes:
-    """Create an in-memory ZIP containing all tables as CSV."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("assets.csv", df_to_csv_bytes(st.session_state.assets))
@@ -91,7 +137,6 @@ def make_backup_zip() -> bytes:
     return buf.read()
 
 def load_backup_zip(zip_bytes: bytes):
-    """Load CSVs from a ZIP into session_state. Missing files fall back to defaults."""
     with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as z:
         names = set(z.namelist())
 
@@ -106,39 +151,11 @@ def load_backup_zip(zip_bytes: bytes):
         st.session_state.reimb = read_df("reimbursements.csv", DEFAULT_REIMB)
         st.session_state.pay = read_df("pay_cycle.csv", DEFAULT_PAY)
 
-def coerce_numeric(df: pd.DataFrame, cols):
-    """
-    Converts text inputs to numbers safely.
-    Accepts: 123.45, 123,45, £123.45, 1,234.56
-    """
-    def parse(v):
-        if v is None:
-            return 0.0
-        s = str(v).strip()
-        if s == "" or s.lower() in {"nan", "none"}:
-            return 0.0
-        s = s.replace("£", "").replace(" ", "")
-        if "," in s and "." in s:
-            s = s.replace(",", "")
-        else:
-            s = s.replace(",", ".")
-        s = re.sub(r"[^0-9\.\-]", "", s)
-        try:
-            return float(s)
-        except:
-            return 0.0
-
-    import re
-    for c in cols:
-        if c in df.columns:
-            df[c] = df[c].apply(parse)
-    return df
-
-# ----------------------------
-# UI: Save / Load controls
-# ----------------------------
 init_state()
 
+# ----------------------------
+# Sidebar Save/Load
+# ----------------------------
 with st.sidebar:
     st.header("Save / Load")
 
@@ -155,7 +172,7 @@ with st.sidebar:
     if uploaded is not None:
         try:
             load_backup_zip(uploaded.read())
-            st.success("Backup restored. (Your tables are now loaded from the ZIP.)")
+            st.success("Backup restored.")
         except Exception as e:
             st.error(f"Couldn’t load that ZIP: {e}")
 
@@ -173,33 +190,65 @@ with st.sidebar:
 # ----------------------------
 st.title("Stabler Family Finances")
 
+# Live FX (USD->GBP). If it fails, fall back to a manual value you can edit.
+fx_col1, fx_col2 = st.columns([2, 1])
+with fx_col1:
+    st.subheader("FX")
+    st.caption("Apple Card is in USD. We convert USD → GBP using a live mid-market reference rate (ECB/Frankfurter).")
+with fx_col2:
+    manual_fx = st.session_state.get("manual_usd_gbp", 0.80)
+    st.session_state.manual_usd_gbp = st.text_input("Manual USD→GBP (fallback)", value=str(manual_fx))
+
+try:
+    usd_gbp = get_fx_rate("USD", "GBP")
+    fx_source = "live"
+except Exception:
+    usd_gbp = parse_money_text(st.session_state.manual_usd_gbp)
+    fx_source = "manual (live failed)"
+
+st.write(f"**USD→GBP rate:** `{usd_gbp:.6f}`  _(source: {fx_source})_")
+
 # Convert text -> numeric for calculations
 assets_num = coerce_numeric(st.session_state.assets.copy(), ["balance"])
-cards_num = coerce_numeric(st.session_state.cards.copy(), ["balance", "due_this_cycle"])
+cards_num = st.session_state.cards.copy()
+# Ensure currency col exists
+if "currency" not in cards_num.columns:
+    cards_num["currency"] = "GBP"
+cards_num["currency"] = cards_num["currency"].fillna("GBP").astype(str).str.upper()
+
+cards_num = coerce_numeric(cards_num, ["balance", "due_this_cycle"])
+
 fixed_num = coerce_numeric(st.session_state.fixed.copy(), ["amount"])
 reimb_num = coerce_numeric(st.session_state.reimb.copy(), ["amount"])
 
+# Convert card amounts to GBP for totals
+def to_gbp(amount: float, currency: str) -> float:
+    if currency == "USD":
+        return amount * usd_gbp
+    return amount  # assume GBP otherwise
+
+cards_num["balance_gbp"] = cards_num.apply(lambda r: to_gbp(float(r["balance"]), r["currency"]), axis=1)
+cards_num["due_gbp"] = cards_num.apply(lambda r: to_gbp(float(r["due_this_cycle"]), r["currency"]), axis=1)
+
 assets_total = float(assets_num["balance"].sum()) if "balance" in assets_num else 0.0
-card_bal_total = float(cards_num["balance"].sum()) if "balance" in cards_num else 0.0
+card_bal_total_gbp = float(cards_num["balance_gbp"].sum()) if "balance_gbp" in cards_num else 0.0
 
-if "is_due" in cards_num.columns and "due_this_cycle" in cards_num.columns:
-    card_due_total = float(cards_num.loc[cards_num["is_due"] == True, "due_this_cycle"].sum())
-else:
-    card_due_total = 0.0
+card_due_total_gbp = 0.0
+if "is_due" in cards_num.columns and "due_gbp" in cards_num.columns:
+    card_due_total_gbp = float(cards_num.loc[cards_num["is_due"] == True, "due_gbp"].sum())
 
+fixed_due_total = 0.0
 if "due" in fixed_num.columns and "amount" in fixed_num.columns:
     fixed_due_total = float(fixed_num.loc[fixed_num["due"] == True, "amount"].sum())
-else:
-    fixed_due_total = 0.0
 
-net_cash = assets_total - card_bal_total
-total_spend_rest_of_month = fixed_due_total + card_due_total
+net_cash = assets_total - card_bal_total_gbp
+total_spend_rest_of_month = fixed_due_total + card_due_total_gbp
 
 # ---- Top KPI row
 k1, k2, k3 = st.columns(3)
 k1.metric("Net Cash", f"£{net_cash:,.2f}")
-k2.metric("Total Credit Card Bill Due", f"£{card_due_total:,.2f}")
-k3.metric("Total Spend Rest of Month", f"£{total_spend_rest_of_month:,.2f}")
+k2.metric("Total Credit Card Bill Due (GBP)", f"£{card_due_total_gbp:,.2f}")
+k3.metric("Total Spend Rest of Month (GBP)", f"£{total_spend_rest_of_month:,.2f}")
 
 st.markdown("---")
 
@@ -227,12 +276,30 @@ with c2:
         use_container_width=True,
         column_config={
             "card": st.column_config.TextColumn("card"),
-            "balance": st.column_config.TextColumn("Balance (£)"),
-            "due_this_cycle": st.column_config.TextColumn("Due this cycle (£)"),
+            "currency": st.column_config.SelectboxColumn(
+                "Currency",
+                options=["GBP", "USD"],
+                required=True,
+            ),
+            "balance": st.column_config.TextColumn("Balance (native)"),
+            "due_this_cycle": st.column_config.TextColumn("Due this cycle (native)"),
             "is_due": st.column_config.CheckboxColumn("Due?"),
         },
         key="cards_editor",
     )
+
+    # Small helper display: converted view
+    st.caption("Converted view (for totals)")
+    show_cards = cards_num[["card", "currency", "balance", "balance_gbp", "due_this_cycle", "due_gbp", "is_due"]].copy()
+    show_cards = show_cards.rename(
+        columns={
+            "balance": "Balance (native)",
+            "balance_gbp": "Balance (GBP)",
+            "due_this_cycle": "Due (native)",
+            "due_gbp": "Due (GBP)",
+        }
+    )
+    st.dataframe(show_cards, use_container_width=True, hide_index=True)
 
 with c3:
     st.subheader("Reimbursement Pending")
@@ -268,7 +335,6 @@ with left:
 
 with right:
     st.subheader("Pay Cycle (setup)")
-    st.caption("Enter monthly take-home pay. (Dates can be added later.)")
     st.session_state.pay = st.data_editor(
         st.session_state.pay,
         num_rows="dynamic",
