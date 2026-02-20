@@ -48,19 +48,22 @@ def coerce_numeric(df: pd.DataFrame, cols):
             df[c] = df[c].apply(parse_money_text)
     return df
 
+def fmt_gbp(x: float) -> str:
+    return f"£{x:,.2f}"
+
 # ----------------------------
 # Defaults
 # ----------------------------
+# Add currency to assets so Apple Savings can be USD
 DEFAULT_ASSETS = pd.DataFrame(
     [
-        {"account": "HSBC", "balance": "0"},
-        {"account": "Lloyds", "balance": "0"},
-        {"account": "Apple Savings", "balance": "0"},
-        {"account": "Cash", "balance": "0"},
+        {"account": "HSBC", "currency": "GBP", "balance": "0"},
+        {"account": "Lloyds", "currency": "GBP", "balance": "0"},
+        {"account": "Apple Savings", "currency": "USD", "balance": "0"},
+        {"account": "Cash", "currency": "GBP", "balance": "0"},
     ]
 )
 
-# Added currency column; Apple Card in USD by default
 DEFAULT_CARDS = pd.DataFrame(
     [
         {"card": "Amex", "currency": "GBP", "balance": "0", "due_this_cycle": "0", "is_due": False},
@@ -196,7 +199,11 @@ except Exception:
 # ----------------------------
 # Calculations
 # ----------------------------
-assets_num = coerce_numeric(st.session_state.assets.copy(), ["balance"])
+assets_num = st.session_state.assets.copy()
+if "currency" not in assets_num.columns:
+    assets_num["currency"] = "GBP"
+assets_num["currency"] = assets_num["currency"].fillna("GBP").astype(str).str.upper()
+assets_num = coerce_numeric(assets_num, ["balance"])
 
 cards_num = st.session_state.cards.copy()
 if "currency" not in cards_num.columns:
@@ -210,16 +217,19 @@ reimb_num = coerce_numeric(st.session_state.reimb.copy(), ["amount"])
 def to_gbp(amount: float, currency: str) -> float:
     return amount * usd_gbp if currency == "USD" else amount
 
+assets_num["balance_gbp"] = assets_num.apply(lambda r: to_gbp(r["balance"], r["currency"]), axis=1)
 cards_num["balance_gbp"] = cards_num.apply(lambda r: to_gbp(r["balance"], r["currency"]), axis=1)
 cards_num["due_gbp"] = cards_num.apply(lambda r: to_gbp(r["due_this_cycle"], r["currency"]), axis=1)
 
-assets_total = float(assets_num["balance"].sum())
-card_bal_total_gbp = float(cards_num["balance_gbp"].sum())
-card_due_total_gbp = float(cards_num.loc[cards_num["is_due"] == True, "due_gbp"].sum()) if "is_due" in cards_num.columns else 0.0
-fixed_due_total = float(fixed_num.loc[fixed_num["due"] == True, "amount"].sum()) if "due" in fixed_num.columns else 0.0
+assets_total_gbp = float(assets_num["balance_gbp"].sum())
+cards_total_balance_gbp = float(cards_num["balance_gbp"].sum())
+cards_due_total_gbp = float(cards_num.loc[cards_num["is_due"] == True, "due_gbp"].sum()) if "is_due" in cards_num.columns else 0.0
+fixed_total_gbp = float(fixed_num["amount"].sum()) if "amount" in fixed_num.columns else 0.0
+fixed_due_total_gbp = float(fixed_num.loc[fixed_num["due"] == True, "amount"].sum()) if "due" in fixed_num.columns else 0.0
+reimb_included_total_gbp = float(reimb_num.loc[reimb_num["include_this_month"] == True, "amount"].sum()) if "include_this_month" in reimb_num.columns else 0.0
 
-net_cash = assets_total - card_bal_total_gbp
-total_spend_rest = fixed_due_total + card_due_total_gbp
+net_cash_gbp = assets_total_gbp - cards_total_balance_gbp
+total_spend_rest_gbp = fixed_due_total_gbp + cards_due_total_gbp
 
 # ----------------------------
 # UI
@@ -227,9 +237,9 @@ total_spend_rest = fixed_due_total + card_due_total_gbp
 st.title("Stabler Family Finances")
 
 k1, k2, k3 = st.columns(3)
-k1.metric("Net Cash", f"£{net_cash:,.2f}")
-k2.metric("Total Credit Card Bill Due (GBP)", f"£{card_due_total_gbp:,.2f}")
-k3.metric("Total Spend Rest of Month (GBP)", f"£{total_spend_rest:,.2f}")
+k1.metric("Net Cash (GBP)", fmt_gbp(net_cash_gbp))
+k2.metric("Total Credit Card Bill Due (GBP)", fmt_gbp(cards_due_total_gbp))
+k3.metric("Total Spend Rest of Month (GBP)", fmt_gbp(total_spend_rest_gbp))
 
 st.markdown("---")
 
@@ -243,10 +253,12 @@ with c1:
         use_container_width=True,
         column_config={
             "account": st.column_config.TextColumn("Account"),
-            "balance": st.column_config.TextColumn("Balance (£)"),
+            "currency": st.column_config.SelectboxColumn("Currency", options=["GBP", "USD"]),
+            "balance": st.column_config.TextColumn("Balance (native)"),
         },
         key="assets_editor",
     )
+    st.caption(f"Total Assets (GBP): {fmt_gbp(assets_total_gbp)}")
 
 with c2:
     st.subheader("Credit Cards")
@@ -263,18 +275,7 @@ with c2:
         },
         key="cards_editor",
     )
-
-    st.caption("Converted (used in totals)")
-    show_cards = cards_num[["card", "currency", "balance", "balance_gbp", "due_this_cycle", "due_gbp", "is_due"]].copy()
-    show_cards = show_cards.rename(
-        columns={
-            "balance": "Balance native",
-            "balance_gbp": "Balance GBP",
-            "due_this_cycle": "Due native",
-            "due_gbp": "Due GBP",
-        }
-    )
-    st.dataframe(show_cards, use_container_width=True, hide_index=True)
+    st.caption(f"Total Card Balances (GBP): {fmt_gbp(cards_total_balance_gbp)} · Total Bills Due (GBP): {fmt_gbp(cards_due_total_gbp)}")
 
 with c3:
     st.subheader("Reimbursement Pending")
@@ -284,11 +285,12 @@ with c3:
         use_container_width=True,
         column_config={
             "source": st.column_config.TextColumn("Source"),
-            "amount": st.column_config.TextColumn("Amount (£)"),
+            "amount": st.column_config.TextColumn("Amount (GBP)"),
             "include_this_month": st.column_config.CheckboxColumn("Include?"),
         },
         key="reimb_editor",
     )
+    st.caption(f"Included Reimbursements (GBP): {fmt_gbp(reimb_included_total_gbp)}")
 
 st.markdown("---")
 
@@ -302,11 +304,12 @@ with left:
         use_container_width=True,
         column_config={
             "item": st.column_config.TextColumn("Item"),
-            "amount": st.column_config.TextColumn("Amount (£)"),
+            "amount": st.column_config.TextColumn("Amount (GBP)"),
             "due": st.column_config.CheckboxColumn("Due?"),
         },
         key="fixed_editor",
     )
+    st.caption(f"Fixed Monthly Total (GBP): {fmt_gbp(fixed_total_gbp)} · Fixed Due (GBP): {fmt_gbp(fixed_due_total_gbp)}")
 
 with right:
     st.subheader("Pay Cycle (setup)")
@@ -327,8 +330,8 @@ st.markdown("---")
 # ----------------------------
 # FX Settings (BOTTOM)
 # ----------------------------
-st.subheader("FX Settings (Apple Card USD → GBP)")
-st.caption("Uses ECB reference rates via Frankfurter when available. If not, uses your manual fallback.")
+st.subheader("FX Settings (USD → GBP)")
+st.caption("Used for Apple Card + Apple Savings. Live rate from Frankfurter when available; fallback is manual.")
 fx1, fx2 = st.columns([2, 1])
 with fx1:
     st.write(f"**USD→GBP rate:** `{usd_gbp:.6f}`  _(source: {fx_source})_")
