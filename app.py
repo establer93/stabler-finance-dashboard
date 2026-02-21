@@ -131,7 +131,11 @@ def fmt_money(amount: float, currency: str) -> str:
 
 @st.cache_data(ttl=60 * 60)  # 1 hour
 def fetch_usd_to_gbp() -> float:
-    r = requests.get("https://api.exchangerate.host/latest", params={"base": "USD", "symbols": "GBP"}, timeout=8)
+    r = requests.get(
+        "https://api.frankfurter.dev/v1/latest",
+        params={"base": "USD", "symbols": "GBP"},
+        timeout=8,
+    )
     r.raise_for_status()
     return float(r.json()["rates"]["GBP"])
 
