@@ -9,7 +9,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 
-SCHEMA_VERSION = "2026-02-21-stabler-finances-stable-v10-single-apply-topright-fixed"
+SCHEMA_VERSION = "2026-02-21-stabler-finances-stable-v11-single-apply-timestamp-no-successbar"
 
 GBP = "GBP"
 USD = "USD"
@@ -462,8 +462,8 @@ if "fx_last_refresh_local" not in st.session_state:
     st.session_state.fx_last_refresh_local = None
 if "last_apply_errors" not in st.session_state:
     st.session_state.last_apply_errors = []
-if "last_apply_success" not in st.session_state:
-    st.session_state.last_apply_success = False
+if "last_apply_local" not in st.session_state:
+    st.session_state.last_apply_local = None
 if "do_snapshot" not in st.session_state:
     st.session_state.do_snapshot = False
 
@@ -502,7 +502,6 @@ with st.sidebar:
             else:
                 st.session_state.app_state = restored
                 st.session_state.pending_zip_bytes = None
-                st.success("Backup restored.")
                 st.rerun()
 
     st.divider()
@@ -520,7 +519,6 @@ with st.sidebar:
             pass
 
     if st.button("📸 Save snapshot (Net Cash)", use_container_width=True):
-        # Defer until after calculations in this run
         st.session_state.do_snapshot = True
         st.rerun()
 
@@ -535,13 +533,14 @@ with st.sidebar:
         st.rerun()
 
 # ------------------------
-# Header row: Title + Apply button placeholder (renders later)
+# Header row: Title + Apply button top-right
 # ------------------------
 h1, h2 = st.columns([4.5, 1.5], vertical_alignment="center")
 with h1:
     st.title("Stabler Family Finances")
 with h2:
     apply_placeholder = st.empty()
+    apply_ts_placeholder = st.empty()
 
 # ------------------------
 # Pull current FX and load tables from stored state
@@ -585,7 +584,7 @@ remaining_spending_gbp = net_cash_gbp + (pay_included_gbp - fixed_due_gbp)
 ability_surplus_gbp = (assets_total_gbp + reim_included_for_repay_gbp) - cards_due_total_gbp
 ability_to_repay = ability_surplus_gbp >= 0
 
-# If snapshot requested this run, store it using current computed net_cash
+# Snapshot requested this run
 if st.session_state.do_snapshot:
     st.session_state.app_state["snapshot"] = {
         "saved_at_local": local_now_str(),
@@ -595,85 +594,14 @@ if st.session_state.do_snapshot:
     st.session_state.do_snapshot = False
     st.rerun()
 
-# Snapshot panel (nicer on-screen)
-snapshot = state.get("snapshot", None)
-snapshot_net_cash = None
-snapshot_time = None
-spent_since_snapshot_gbp = None
-delta_since_snapshot_gbp = None
-
-if isinstance(snapshot, dict):
-    snapshot_time = snapshot.get("saved_at_local", None)
-    try:
-        snapshot_net_cash = float(snapshot.get("net_cash_gbp", 0.0))
-        delta_since_snapshot_gbp = float(net_cash_gbp - snapshot_net_cash)
-        spent_since_snapshot_gbp = float(snapshot_net_cash - net_cash_gbp)
-    except Exception:
-        snapshot_net_cash = None
-
-if snapshot_net_cash is not None:
-    st.markdown("### Snapshot")
-
-    s1, s2, s3 = st.columns([1.4, 1.3, 1.3])
-    with s1:
-        st.markdown(
-            f"""
-<div style="
-  border:1px solid rgba(255,255,255,0.12);
-  border-radius:14px;
-  padding:14px 16px;
-  background: rgba(255,255,255,0.03);
-">
-  <div style="opacity:0.75; font-size:13px; margin-bottom:6px;">Saved at</div>
-  <div style="font-size:18px; font-weight:650;">{snapshot_time}</div>
-  <div class="totals" style="margin-top:10px;">
-    Snapshot Net Cash: <span class="{cls(snapshot_net_cash)}">{fmt_money(snapshot_net_cash, GBP)}</span>
-  </div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-
-    with s2:
-        st.markdown(
-            f"""
-<div style="
-  border:1px solid rgba(255,255,255,0.12);
-  border-radius:14px;
-  padding:14px 16px;
-  background: rgba(255,255,255,0.03);
-">
-  <div style="opacity:0.75; font-size:13px; margin-bottom:6px;">Change in Net Cash</div>
-  <div style="font-size:28px; font-weight:750;" class="{cls(delta_since_snapshot_gbp)}">
-    {fmt_money(delta_since_snapshot_gbp, GBP)}
-  </div>
-  <div class="totals">Since the snapshot</div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-
-    with s3:
-        spent_display = float(spent_since_snapshot_gbp)
-        spent_css = "neg" if spent_display > 0 else "pos" if spent_display < 0 else "neu"
-
-        st.markdown(
-            f"""
-<div style="
-  border:1px solid rgba(255,255,255,0.12);
-  border-radius:14px;
-  padding:14px 16px;
-  background: rgba(255,255,255,0.03);
-">
-  <div style="opacity:0.75; font-size:13px; margin-bottom:6px;">Spent since snapshot</div>
-  <div style="font-size:28px; font-weight:750;" class="{spent_css}">
-    {fmt_money(abs(spent_display), GBP)}
-  </div>
-  <div class="totals">{'Net spend' if spent_display >= 0 else 'Net increase'}</div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
+# ------------------------
+# Show invalid-input warnings (if any)
+# ------------------------
+if st.session_state.last_apply_errors:
+    st.warning(
+        "Some values were invalid and were saved as £0.00:\n- " + "\n- ".join(st.session_state.last_apply_errors)
+    )
+    st.session_state.last_apply_errors = []
 
 # ------------------------
 # KPIs
@@ -707,6 +635,29 @@ with k2:
 with k3:
     kpi("Remaining spending this month (GBP)", remaining_spending_gbp)
 
+# ------------------------
+# Snapshot delta line (original simple style)
+# ------------------------
+snapshot = state.get("snapshot", None)
+snapshot_net_cash = None
+snapshot_time = None
+spent_since_snapshot_gbp = None
+delta_since_snapshot_gbp = None
+
+if isinstance(snapshot, dict):
+    snapshot_net_cash = snapshot.get("net_cash_gbp", None)
+    snapshot_time = snapshot.get("saved_at_local", None)
+    try:
+        if snapshot_net_cash is not None:
+            snapshot_net_cash = float(snapshot_net_cash)
+            delta_since_snapshot_gbp = float(net_cash_gbp - snapshot_net_cash)
+            spent_since_snapshot_gbp = float(snapshot_net_cash - net_cash_gbp)
+    except Exception:
+        snapshot_net_cash = None
+        snapshot_time = None
+        spent_since_snapshot_gbp = None
+        delta_since_snapshot_gbp = None
+
 if snapshot_net_cash is not None and spent_since_snapshot_gbp is not None and delta_since_snapshot_gbp is not None:
     st.markdown(
         f"""
@@ -723,7 +674,7 @@ if snapshot_net_cash is not None and spent_since_snapshot_gbp is not None and de
 st.divider()
 
 # ------------------------
-# Editors (NO apply buttons)
+# Editors
 # ------------------------
 a, b, c = st.columns([1.2, 1.1, 1.1])
 
@@ -907,9 +858,14 @@ with fxr:
     )
 
 # ------------------------
-# ONE MAIN APPLY BUTTON (rendered top-right)
+# Main Apply button (top-right) + timestamp under it
 # ------------------------
 apply_clicked = apply_placeholder.button("✅ Apply all changes", type="primary", use_container_width=True)
+
+if st.session_state.last_apply_local:
+    apply_ts_placeholder.caption(f"Last applied: {st.session_state.last_apply_local}")
+else:
+    apply_ts_placeholder.caption("Last applied: —")
 
 if apply_clicked:
     errors: list[str] = []
@@ -975,8 +931,8 @@ if apply_clicked:
     # FX settings
     st.session_state.app_state["fx"] = {"use_live": bool(use_live), "manual_usd_gbp": float(manual)}
 
-    # Store messages for next run
+    # Store warnings + timestamp
     st.session_state.last_apply_errors = errors
-    st.session_state.last_apply_success = True
+    st.session_state.last_apply_local = local_now_str()
 
     st.rerun()
