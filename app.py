@@ -528,7 +528,7 @@ with k2:
   <div class="value neu">{fmt_money(cards_due_total_gbp, GBP)}</div>
   <div style="margin-top:8px;">
     <span class="badge {'badge-ok' if ability_to_repay else 'badge-warn'}">
-      Ability to repay: {'Yes' if ability_to_repay else 'No'}
+      Ability to repay (incl. selected reimbursements):: {'Yes' if ability_to_repay else 'No'}
     </span>
   </div>
 </div>
