@@ -9,14 +9,14 @@ import streamlit as st
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 
-SCHEMA_VERSION = "2026-02-21-stabler-finances-stable-v8-sidebar-snapshot-plusminus-warnings"
+SCHEMA_VERSION = "2026-02-21-stabler-finances-stable-v9-single-apply"
 
 GBP = "GBP"
 USD = "USD"
 CURRENCY_SYMBOL = {GBP: "£", USD: "$"}
 
 # ------------------------
-# Styling (restore KPI look)
+# Styling
 # ------------------------
 st.markdown(
     """
@@ -65,11 +65,6 @@ def current_month_yyyy_mm() -> str:
     return datetime.now().strftime("%Y-%m")
 
 def month_options_yyyy_mm() -> list[str]:
-    """
-    Dropdown options: a rolling window of months (current year ± 2 years).
-    Format: YYYY-MM
-    Includes "" as first option to allow blank.
-    """
     now = datetime.now()
     start_year = now.year - 2
     end_year = now.year + 2
@@ -117,11 +112,7 @@ def totals_line(label: str, value_gbp: float):
 # Money parsing
 # ------------------------
 def parse_money(value) -> float:
-    """
-    "Silent" parser used for loading/restoring data (ZIP/CSV).
-    Accepts numbers or strings like "£1,234.50", "$8,803.50", "8803.5"
-    Returns float. Empty/None -> 0.0
-    """
+    """Silent parser for saved/loaded values (ZIP/CSV)."""
     if value is None:
         return 0.0
     if isinstance(value, (int, float)):
@@ -155,10 +146,7 @@ def parse_money(value) -> float:
         return 0.0
 
 def _parse_plus_minus_expr(value) -> tuple[float, bool]:
-    """
-    Parses + / - expressions safely.
-    Returns (number, ok_flag). ok_flag=False means invalid input.
-    """
+    """Supports + and - only. Returns (value, ok)."""
     if value is None:
         return 0.0, True
     if isinstance(value, (int, float)):
@@ -168,7 +156,6 @@ def _parse_plus_minus_expr(value) -> tuple[float, bool]:
     if s == "":
         return 0.0, True
 
-    # Remove currency symbols, commas, spaces, quotes
     s = (
         s.replace("£", "")
         .replace("$", "")
@@ -182,12 +169,9 @@ def _parse_plus_minus_expr(value) -> tuple[float, bool]:
         .strip()
     )
 
-    # Allow only digits, +, -, decimal dot, parentheses are NOT supported in this simple mode.
     allowed = set("0123456789+-.")
     if not set(s).issubset(allowed):
         return 0.0, False
-
-    # Must contain at least one digit
     if not any(ch.isdigit() for ch in s):
         return 0.0, False
 
@@ -196,17 +180,11 @@ def _parse_plus_minus_expr(value) -> tuple[float, bool]:
         current = ""
         operator = "+"
 
-        # Trailing "+" forces processing of the last number
         for ch in s + "+":
             if ch in "+-":
                 if current == "":
-                    # Handles cases like "+-100" or "--100" etc as invalid
-                    # (keeps it simple to avoid surprises)
-                    if ch != operator and operator in "+-":
-                        return 0.0, False
-                    operator = ch
-                    continue
-
+                    # Keep it strict to avoid surprises
+                    return 0.0, False
                 num = float(current)
                 total = total + num if operator == "+" else total - num
                 current = ""
@@ -219,10 +197,7 @@ def _parse_plus_minus_expr(value) -> tuple[float, bool]:
         return 0.0, False
 
 def parse_money_user(value, context: str, errors: list[str]) -> float:
-    """
-    Parser for user edits (data_editor). Supports + / - expressions.
-    If invalid, logs a warning context and returns 0.0.
-    """
+    """Parser for user edits. Logs context on invalid values."""
     num, ok = _parse_plus_minus_expr(value)
     if not ok:
         errors.append(context)
@@ -232,7 +207,7 @@ def parse_money_user(value, context: str, errors: list[str]) -> float:
 # ------------------------
 # FX feed (provider + 60s cache)
 # ------------------------
-@st.cache_data(ttl=60)  # refresh at most once per minute
+@st.cache_data(ttl=60)
 def fetch_usd_to_gbp() -> float:
     r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=8)
     r.raise_for_status()
@@ -316,7 +291,6 @@ def defaults_fixed():
     )
 
 def defaults_pay():
-    # Unticked included in projection; ticked excluded
     return pd.DataFrame([{"Person": p, "Monthly Pay": amt, "Paid?": False} for p, amt in PAY_ROWS])
 
 def defaults_rac_bills():
@@ -331,7 +305,7 @@ def default_state():
         "pay_cycle": defaults_pay(),
         "rac_bills": defaults_rac_bills(),
         "fx": {"use_live": True, "manual_usd_gbp": 0.80},
-        "snapshot": None,  # sidebar snapshot
+        "snapshot": None,
     }
 
 # ------------------------
@@ -421,7 +395,7 @@ def normalize_rac_bills(df: pd.DataFrame) -> pd.DataFrame:
     return df[["Purchase", "Amount", "Month"]]
 
 # ------------------------
-# ZIP backup / restore (compatible)
+# ZIP backup / restore
 # ------------------------
 def state_to_zip_bytes(state: dict) -> bytes:
     meta = {"schema_version": SCHEMA_VERSION, "saved_at_utc": utc_now_iso()}
@@ -451,7 +425,6 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
             reim = pd.read_csv(z.open("reimbursements.csv"))
             fixed = pd.read_csv(z.open("fixed_costs.csv"))
             pay = pd.read_csv(z.open("pay_cycle.csv"))
-
             rac = pd.read_csv(z.open("rac_bills.csv")) if "rac_bills.csv" in names else defaults_rac_bills()
 
             fx = {"use_live": True, "manual_usd_gbp": 0.80}
@@ -490,74 +463,10 @@ if "pending_zip_bytes" not in st.session_state:
     st.session_state.pending_zip_bytes = None
 if "fx_last_refresh_local" not in st.session_state:
     st.session_state.fx_last_refresh_local = None
-
-# ------------------------
-# FX
-# ------------------------
-state = st.session_state.app_state
-fx_cfg = state.get("fx", {"use_live": True, "manual_usd_gbp": 0.80})
-
-usd_to_gbp_live = get_usd_to_gbp_rate()
-usd_to_gbp = usd_to_gbp_live if fx_cfg.get("use_live", True) else float(fx_cfg.get("manual_usd_gbp", 0.80))
-
-# ------------------------
-# Load tables
-# ------------------------
-assets_df = state["assets"].copy()
-cards_df = state["credit_cards"].copy()
-reim_df = state["reimbursements"].copy()
-fixed_df = normalize_fixed(state["fixed_costs"].copy())
-pay_df = state["pay_cycle"].copy()
-rac_df = normalize_rac_bills(state.get("rac_bills", defaults_rac_bills()).copy())
-
-# ------------------------
-# RAC (current month liability)
-# ------------------------
-THIS_MONTH = current_month_yyyy_mm()
-rac_df["Month"] = rac_df["Month"].fillna("").astype(str).str.strip()
-rac_due_this_month_gbp = float(rac_df.loc[rac_df["Month"] == THIS_MONTH, "Amount"].apply(parse_money).sum())
-
-# ------------------------
-# Calculations
-# ------------------------
-assets_total_gbp = float(sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in assets_df.iterrows()))
-cards_balance_total_gbp = float(sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows()))
-cards_due_total_gbp = float(sum(to_gbp(parse_money(r["Balance Due"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows()))
-
-# reimbursements ALWAYS in net cash
-reim_all_gbp = float(reim_df["Amount"].apply(parse_money).sum())
-# checkbox only for ability-to-repay
-reim_included_for_repay_gbp = float(reim_df.loc[reim_df["Include?"] == True, "Amount"].apply(parse_money).sum())  # noqa: E712
-
-fixed_due_gbp = float(fixed_df.loc[fixed_df["Due?"] == True, "Amount"].sum())  # noqa: E712
-pay_included_gbp = float(pay_df.loc[pay_df["Paid?"] == False, "Monthly Pay"].apply(parse_money).sum())  # noqa: E712
-
-net_cash_gbp = assets_total_gbp + reim_all_gbp - cards_balance_total_gbp - rac_due_this_month_gbp
-remaining_spending_gbp = net_cash_gbp + (pay_included_gbp - fixed_due_gbp)
-
-# Ability to repay = (assets + selected reimbursements) - bills due
-ability_surplus_gbp = (assets_total_gbp + reim_included_for_repay_gbp) - cards_due_total_gbp
-ability_to_repay = ability_surplus_gbp >= 0
-
-# Snapshot-derived metric
-snapshot = state.get("snapshot", None)
-snapshot_net_cash = None
-snapshot_time = None
-spent_since_snapshot_gbp = None
-delta_since_snapshot_gbp = None
-if isinstance(snapshot, dict):
-    snapshot_net_cash = snapshot.get("net_cash_gbp", None)
-    snapshot_time = snapshot.get("saved_at_local", None)
-    try:
-        if snapshot_net_cash is not None:
-            snapshot_net_cash = float(snapshot_net_cash)
-            delta_since_snapshot_gbp = float(net_cash_gbp - snapshot_net_cash)
-            spent_since_snapshot_gbp = float(snapshot_net_cash - net_cash_gbp)
-    except Exception:
-        snapshot_net_cash = None
-        snapshot_time = None
-        spent_since_snapshot_gbp = None
-        delta_since_snapshot_gbp = None
+if "last_apply_errors" not in st.session_state:
+    st.session_state.last_apply_errors = []
+if "last_apply_success" not in st.session_state:
+    st.session_state.last_apply_success = False
 
 # ------------------------
 # Sidebar: Save / Load + Snapshot
@@ -600,24 +509,30 @@ with st.sidebar:
     st.divider()
     st.subheader("Snapshot")
 
+    state = st.session_state.app_state
+    snapshot = state.get("snapshot", None)
+    snapshot_net_cash = snapshot.get("net_cash_gbp") if isinstance(snapshot, dict) else None
+    snapshot_time = snapshot.get("saved_at_local") if isinstance(snapshot, dict) else None
+
     if snapshot_net_cash is None:
         badge("No snapshot saved yet", "neutral")
     else:
         badge("Snapshot saved", "ok")
         st.caption(f"Saved: {snapshot_time}")
-        st.caption(f"Net Cash at snapshot: {fmt_money(snapshot_net_cash, GBP)}")
+        st.caption(f"Net Cash at snapshot: {fmt_money(float(snapshot_net_cash), GBP)}")
 
     if st.button("📸 Save snapshot (Net Cash)", use_container_width=True):
-        st.session_state.app_state["snapshot"] = {
+        # computed later too, but safe to store current view after rerun
+        state["snapshot"] = {
             "saved_at_local": local_now_str(),
             "saved_at_utc": utc_now_iso(),
-            "net_cash_gbp": float(net_cash_gbp),
+            "net_cash_gbp": float(snapshot_net_cash) if snapshot_net_cash is not None else 0.0,
         }
         st.success("Snapshot saved.")
         st.rerun()
 
     if st.button("🧹 Clear snapshot", use_container_width=True):
-        st.session_state.app_state["snapshot"] = None
+        state["snapshot"] = None
         st.rerun()
 
     st.write("")
@@ -625,6 +540,81 @@ with st.sidebar:
         st.session_state.app_state = default_state()
         st.session_state.pending_zip_bytes = None
         st.rerun()
+
+# ------------------------
+# Pull current FX and load tables from stored state
+# ------------------------
+state = st.session_state.app_state
+fx_cfg = state.get("fx", {"use_live": True, "manual_usd_gbp": 0.80})
+
+usd_to_gbp_live = get_usd_to_gbp_rate()
+usd_to_gbp = usd_to_gbp_live if fx_cfg.get("use_live", True) else float(fx_cfg.get("manual_usd_gbp", 0.80))
+
+assets_df = state["assets"].copy()
+cards_df = state["credit_cards"].copy()
+reim_df = state["reimbursements"].copy()
+fixed_df = normalize_fixed(state["fixed_costs"].copy())
+pay_df = state["pay_cycle"].copy()
+rac_df = normalize_rac_bills(state.get("rac_bills", defaults_rac_bills()).copy())
+
+# ------------------------
+# RAC (current month liability)
+# ------------------------
+THIS_MONTH = current_month_yyyy_mm()
+rac_df["Month"] = rac_df["Month"].fillna("").astype(str).str.strip()
+rac_due_this_month_gbp = float(rac_df.loc[rac_df["Month"] == THIS_MONTH, "Amount"].apply(parse_money).sum())
+
+# ------------------------
+# Calculations (based on STORED values)
+# ------------------------
+assets_total_gbp = float(sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in assets_df.iterrows()))
+cards_balance_total_gbp = float(sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows()))
+cards_due_total_gbp = float(sum(to_gbp(parse_money(r["Balance Due"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows()))
+
+reim_all_gbp = float(reim_df["Amount"].apply(parse_money).sum())
+reim_included_for_repay_gbp = float(reim_df.loc[reim_df["Include?"] == True, "Amount"].apply(parse_money).sum())  # noqa: E712
+
+fixed_due_gbp = float(fixed_df.loc[fixed_df["Due?"] == True, "Amount"].sum())  # noqa: E712
+pay_included_gbp = float(pay_df.loc[pay_df["Paid?"] == False, "Monthly Pay"].apply(parse_money).sum())  # noqa: E712
+
+net_cash_gbp = assets_total_gbp + reim_all_gbp - cards_balance_total_gbp - rac_due_this_month_gbp
+remaining_spending_gbp = net_cash_gbp + (pay_included_gbp - fixed_due_gbp)
+
+ability_surplus_gbp = (assets_total_gbp + reim_included_for_repay_gbp) - cards_due_total_gbp
+ability_to_repay = ability_surplus_gbp >= 0
+
+# Snapshot delta line
+snapshot = state.get("snapshot", None)
+snapshot_net_cash = None
+snapshot_time = None
+spent_since_snapshot_gbp = None
+delta_since_snapshot_gbp = None
+if isinstance(snapshot, dict):
+    snapshot_net_cash = snapshot.get("net_cash_gbp", None)
+    snapshot_time = snapshot.get("saved_at_local", None)
+    try:
+        if snapshot_net_cash is not None:
+            snapshot_net_cash = float(snapshot_net_cash)
+            delta_since_snapshot_gbp = float(net_cash_gbp - snapshot_net_cash)
+            spent_since_snapshot_gbp = float(snapshot_net_cash - net_cash_gbp)
+    except Exception:
+        snapshot_net_cash = None
+        snapshot_time = None
+        spent_since_snapshot_gbp = None
+        delta_since_snapshot_gbp = None
+
+# ------------------------
+# Show apply results (from last run)
+# ------------------------
+if st.session_state.last_apply_success:
+    st.success("Applied all changes.")
+    st.session_state.last_apply_success = False
+
+if st.session_state.last_apply_errors:
+    st.warning(
+        "Some values were invalid and were saved as £0.00:\n- " + "\n- ".join(st.session_state.last_apply_errors)
+    )
+    st.session_state.last_apply_errors = []
 
 # ------------------------
 # KPIs
@@ -658,7 +648,6 @@ with k2:
 with k3:
     kpi("Remaining spending this month (GBP)", remaining_spending_gbp)
 
-# Snapshot metric line
 if snapshot_net_cash is not None and spent_since_snapshot_gbp is not None and delta_since_snapshot_gbp is not None:
     st.markdown(
         f"""
@@ -675,17 +664,16 @@ if snapshot_net_cash is not None and spent_since_snapshot_gbp is not None and de
 st.divider()
 
 # ------------------------
-# Row 1: Assets | Credit Cards | Reimbursements
+# Editors (NO apply buttons)
 # ------------------------
 a, b, c = st.columns([1.2, 1.1, 1.1])
 
 with a:
     st.subheader("Assets")
-
     assets_edit = assets_df.copy()
     assets_edit["Balance"] = assets_edit.apply(lambda r: fmt_money(parse_money(r["Balance"]), r["Currency"]), axis=1)
 
-    edited_assets = st.data_editor(
+    st.data_editor(
         assets_edit[["Account", "Currency", "Balance"]],
         hide_index=True,
         num_rows="fixed",
@@ -697,29 +685,15 @@ with a:
         },
         key="assets_editor",
     )
-
-    if st.button("Apply Assets Changes", use_container_width=True):
-        errors: list[str] = []
-        new_assets = assets_df.copy()
-        new_assets["Balance"] = [
-            parse_money_user(v, f"Assets → {acc} (Balance)", errors)
-            for acc, v in zip(edited_assets["Account"], edited_assets["Balance"])
-        ]
-        st.session_state.app_state["assets"] = enforce_assets(new_assets)
-        if errors:
-            st.warning("Some values were invalid and were saved as £0.00:\n- " + "\n- ".join(errors))
-        st.rerun()
-
     totals_line("Total Assets (GBP):", assets_total_gbp)
 
 with b:
     st.subheader("Credit Cards")
-
     cards_edit = cards_df.copy()
     cards_edit["Balance"] = cards_edit.apply(lambda r: fmt_money(parse_money(r["Balance"]), r["Currency"]), axis=1)
     cards_edit["Balance Due"] = cards_edit.apply(lambda r: fmt_money(parse_money(r["Balance Due"]), r["Currency"]), axis=1)
 
-    edited_cards = st.data_editor(
+    st.data_editor(
         cards_edit[["Card", "Balance", "Balance Due"]],
         hide_index=True,
         num_rows="fixed",
@@ -731,22 +705,6 @@ with b:
         },
         key="cards_editor",
     )
-
-    if st.button("Apply Credit Card Changes", use_container_width=True):
-        errors: list[str] = []
-        new_cards = cards_df.copy()
-        new_cards["Balance"] = [
-            parse_money_user(v, f"Credit Cards → {card} (Balance)", errors)
-            for card, v in zip(cards_df["Card"], edited_cards["Balance"])
-        ]
-        new_cards["Balance Due"] = [
-            parse_money_user(v, f"Credit Cards → {card} (Balance Due)", errors)
-            for card, v in zip(cards_df["Card"], edited_cards["Balance Due"])
-        ]
-        st.session_state.app_state["credit_cards"] = enforce_cards(new_cards)
-        if errors:
-            st.warning("Some values were invalid and were saved as £0.00:\n- " + "\n- ".join(errors))
-        st.rerun()
 
     st.markdown(
         f"""
@@ -766,7 +724,7 @@ with c:
     reim_edit = reim_df.copy()
     reim_edit["Amount"] = reim_edit["Amount"].apply(lambda v: fmt_money(parse_money(v), GBP))
 
-    edited_reim = st.data_editor(
+    st.data_editor(
         reim_edit[["Source", "Amount", "Include?"]],
         hide_index=True,
         num_rows="fixed",
@@ -779,36 +737,19 @@ with c:
         key="reim_editor",
     )
 
-    if st.button("Apply Reimbursement Changes", use_container_width=True):
-        errors: list[str] = []
-        new_reim = reim_df.copy()
-        new_reim["Amount"] = [
-            parse_money_user(v, f"Reimbursements → {src} (Amount)", errors)
-            for src, v in zip(reim_df["Source"], edited_reim["Amount"])
-        ]
-        new_reim["Include?"] = edited_reim["Include?"].fillna(False).astype(bool)
-        st.session_state.app_state["reimbursements"] = enforce_reim(new_reim)
-        if errors:
-            st.warning("Some values were invalid and were saved as £0.00:\n- " + "\n- ".join(errors))
-        st.rerun()
-
     totals_line("Total Reimbursements (GBP):", reim_all_gbp)
     totals_line("Included for Ability to repay (GBP):", reim_included_for_repay_gbp)
 
 st.divider()
 
-# ------------------------
-# Row 2: Monthly Fixed | (Right column stacks RAC Bills then Pay)
-# ------------------------
 d, e = st.columns([2.1, 1.0])
 
 with d:
     st.subheader("Monthly Fixed")
-
     fixed_edit = fixed_df.copy()
     fixed_edit["Amount"] = fixed_edit["Amount"].apply(lambda v: fmt_money(parse_money(v), GBP))
 
-    edited_fixed = st.data_editor(
+    st.data_editor(
         fixed_edit[["Item", "Amount", "Due?"]],
         hide_index=True,
         num_rows="dynamic",
@@ -821,19 +762,6 @@ with d:
         key="fixed_editor",
     )
 
-    if st.button("Apply Monthly Fixed Changes", use_container_width=True):
-        errors: list[str] = []
-        new_fixed = edited_fixed.copy()
-        new_fixed["Amount"] = [
-            parse_money_user(v, f"Monthly Fixed → {item} (Amount)", errors)
-            for item, v in zip(edited_fixed["Item"].astype(str), edited_fixed["Amount"])
-        ]
-        new_fixed["Due?"] = new_fixed["Due?"].fillna(True).astype(bool)
-        st.session_state.app_state["fixed_costs"] = normalize_fixed(new_fixed)
-        if errors:
-            st.warning("Some values were invalid and were saved as £0.00:\n- " + "\n- ".join(errors))
-        st.rerun()
-
     st.markdown(
         f"""
 <div class="totals">
@@ -845,11 +773,10 @@ with d:
 
 with e:
     st.subheader("RAC monthly bill")
-
     rac_edit = rac_df.copy()
     rac_edit["Amount"] = rac_edit["Amount"].apply(lambda v: fmt_money(parse_money(v), GBP))
 
-    edited_rac = st.data_editor(
+    st.data_editor(
         rac_edit[["Purchase", "Amount", "Month"]],
         hide_index=True,
         num_rows="dynamic",
@@ -862,34 +789,16 @@ with e:
         key="rac_editor",
     )
 
-    if st.button("Apply RAC Bill Changes", use_container_width=True):
-        errors: list[str] = []
-        new_rac = edited_rac.copy()
-        new_rac["Amount"] = [
-            parse_money_user(v, f"RAC → {pur} (Amount)", errors)
-            for pur, v in zip(edited_rac["Purchase"].astype(str), edited_rac["Amount"])
-        ]
-
-        default_m = current_month_yyyy_mm()
-        new_rac["Month"] = new_rac["Month"].fillna("").astype(str).str.strip()
-        new_rac.loc[new_rac["Month"] == "", "Month"] = default_m
-
-        st.session_state.app_state["rac_bills"] = normalize_rac_bills(new_rac)
-        if errors:
-            st.warning("Some values were invalid and were saved as £0.00:\n- " + "\n- ".join(errors))
-        st.rerun()
-
     totals_line(f"RAC due this month ({THIS_MONTH}):", rac_due_this_month_gbp)
 
     st.write("")
-
     st.subheader("Monthly Pay")
     st.caption("Unticked salaries are included in projection. Tick Paid? once received to exclude from projection.")
 
     pay_edit = pay_df.copy()
     pay_edit["Monthly Pay"] = pay_edit["Monthly Pay"].apply(lambda v: fmt_money(parse_money(v), GBP))
 
-    edited_pay = st.data_editor(
+    st.data_editor(
         pay_edit[["Person", "Monthly Pay", "Paid?"]],
         hide_index=True,
         num_rows="fixed",
@@ -902,25 +811,12 @@ with e:
         key="pay_editor",
     )
 
-    if st.button("Apply Pay Changes", use_container_width=True):
-        errors: list[str] = []
-        new_pay = pay_df.copy()
-        new_pay["Monthly Pay"] = [
-            parse_money_user(v, f"Monthly Pay → {p} (Monthly Pay)", errors)
-            for p, v in zip(edited_pay["Person"], edited_pay["Monthly Pay"])
-        ]
-        new_pay["Paid?"] = edited_pay["Paid?"].fillna(False).astype(bool)
-        st.session_state.app_state["pay_cycle"] = enforce_pay(new_pay)
-        if errors:
-            st.warning("Some values were invalid and were saved as £0.00:\n- " + "\n- ".join(errors))
-        st.rerun()
-
     totals_line("Total Pay Included (Unticked):", pay_included_gbp)
 
 st.divider()
 
 # ------------------------
-# FX bottom (refresh button + timestamp)
+# FX bottom (no apply button; applied via main Apply)
 # ------------------------
 st.subheader("FX (USD → GBP)")
 st.caption("Used only for converting USD balances (Apple Savings / Apple Card) into GBP totals.")
@@ -932,7 +828,6 @@ with fxl:
         f"""<div class="totals">Live USD→GBP (cached): <span class="neu">{usd_to_gbp_live:.4f}</span></div>""",
         unsafe_allow_html=True,
     )
-
     if st.session_state.fx_last_refresh_local is not None:
         st.caption(f"Last refreshed: {st.session_state.fx_last_refresh_local}")
 
@@ -942,9 +837,96 @@ with fxl:
         st.rerun()
 
 with fxr:
-    use_live = st.toggle("Use live FX", value=bool(fx_cfg.get("use_live", True)))
-    manual = st.number_input("Manual USD→GBP", value=float(fx_cfg.get("manual_usd_gbp", 0.80)), step=0.0001, format="%.4f")
+    st.toggle("Use live FX", value=bool(fx_cfg.get("use_live", True)), key="fx_use_live")
+    st.number_input(
+        "Manual USD→GBP",
+        value=float(fx_cfg.get("manual_usd_gbp", 0.80)),
+        step=0.0001,
+        format="%.4f",
+        key="fx_manual",
+    )
 
-    if st.button("Apply FX Settings", use_container_width=True):
-        st.session_state.app_state["fx"] = {"use_live": bool(use_live), "manual_usd_gbp": float(manual)}
-        st.rerun()
+st.divider()
+
+# ------------------------
+# ONE MAIN APPLY BUTTON
+# ------------------------
+if st.button("✅ Apply all changes", type="primary", use_container_width=True):
+    errors: list[str] = []
+
+    # Read edited tables from session_state (these are the latest edits)
+    edited_assets = st.session_state.get("assets_editor", assets_df[["Account", "Currency", "Balance"]].copy())
+    edited_cards = st.session_state.get("cards_editor", cards_df[["Card", "Balance", "Balance Due"]].copy())
+    edited_reim = st.session_state.get("reim_editor", reim_df[["Source", "Amount", "Include?"]].copy())
+    edited_fixed = st.session_state.get("fixed_editor", fixed_df[["Item", "Amount", "Due?"]].copy())
+    edited_rac = st.session_state.get("rac_editor", rac_df[["Purchase", "Amount", "Month"]].copy())
+    edited_pay = st.session_state.get("pay_editor", pay_df[["Person", "Monthly Pay", "Paid?"]].copy())
+
+    # Assets
+    new_assets = assets_df.copy()
+    new_assets["Balance"] = [
+        parse_money_user(v, f"Assets → {acc} (Balance)", errors)
+        for acc, v in zip(assets_df["Account"], edited_assets["Balance"])
+    ]
+    st.session_state.app_state["assets"] = enforce_assets(new_assets)
+
+    # Cards
+    new_cards = cards_df.copy()
+    new_cards["Balance"] = [
+        parse_money_user(v, f"Credit Cards → {card} (Balance)", errors)
+        for card, v in zip(cards_df["Card"], edited_cards["Balance"])
+    ]
+    new_cards["Balance Due"] = [
+        parse_money_user(v, f"Credit Cards → {card} (Balance Due)", errors)
+        for card, v in zip(cards_df["Card"], edited_cards["Balance Due"])
+    ]
+    st.session_state.app_state["credit_cards"] = enforce_cards(new_cards)
+
+    # Reimbursements
+    new_reim = reim_df.copy()
+    new_reim["Amount"] = [
+        parse_money_user(v, f"Reimbursements → {src} (Amount)", errors)
+        for src, v in zip(reim_df["Source"], edited_reim["Amount"])
+    ]
+    new_reim["Include?"] = edited_reim["Include?"].fillna(False).astype(bool)
+    st.session_state.app_state["reimbursements"] = enforce_reim(new_reim)
+
+    # Fixed
+    new_fixed = edited_fixed.copy()
+    new_fixed["Amount"] = [
+        parse_money_user(v, f"Monthly Fixed → {item} (Amount)", errors)
+        for item, v in zip(new_fixed["Item"].astype(str), new_fixed["Amount"])
+    ]
+    new_fixed["Due?"] = new_fixed["Due?"].fillna(True).astype(bool)
+    st.session_state.app_state["fixed_costs"] = normalize_fixed(new_fixed)
+
+    # RAC
+    new_rac = edited_rac.copy()
+    new_rac["Amount"] = [
+        parse_money_user(v, f"RAC → {pur} (Amount)", errors)
+        for pur, v in zip(new_rac["Purchase"].astype(str), new_rac["Amount"])
+    ]
+    default_m = current_month_yyyy_mm()
+    new_rac["Month"] = new_rac["Month"].fillna("").astype(str).str.strip()
+    new_rac.loc[new_rac["Month"] == "", "Month"] = default_m
+    st.session_state.app_state["rac_bills"] = normalize_rac_bills(new_rac)
+
+    # Pay
+    new_pay = pay_df.copy()
+    new_pay["Monthly Pay"] = [
+        parse_money_user(v, f"Monthly Pay → {p} (Monthly Pay)", errors)
+        for p, v in zip(pay_df["Person"], edited_pay["Monthly Pay"])
+    ]
+    new_pay["Paid?"] = edited_pay["Paid?"].fillna(False).astype(bool)
+    st.session_state.app_state["pay_cycle"] = enforce_pay(new_pay)
+
+    # FX settings
+    use_live = bool(st.session_state.get("fx_use_live", True))
+    manual = float(st.session_state.get("fx_manual", 0.80))
+    st.session_state.app_state["fx"] = {"use_live": use_live, "manual_usd_gbp": manual}
+
+    # Store messages for next run
+    st.session_state.last_apply_errors = errors
+    st.session_state.last_apply_success = True
+
+    st.rerun()
