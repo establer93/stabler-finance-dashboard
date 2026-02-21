@@ -1,7 +1,9 @@
+# app.py
 import io
+import json
 import zipfile
-from datetime import datetime, timezone
-import hashlib
+from dataclasses import dataclass
+from typing import Dict, Tuple
 
 import pandas as pd
 import requests
@@ -9,192 +11,134 @@ import streamlit as st
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 
-SCHEMA_VERSION = "2026-02-21-zip-polish-v7-main-currency-display"
-
-# ------------------------
-# Styling (colours)
-# ------------------------
-st.markdown(
-    """
-<style>
-.kpi { padding: 6px 2px 18px 2px; }
-.kpi .label { font-size: 14px; opacity: 0.75; margin-bottom: 6px; }
-.kpi .value { font-size: 44px; font-weight: 700; line-height: 1.0; }
-.kpi .pos { color: #2ECC71; }
-.kpi .neg { color: #FF4B4B; }
-.kpi .neu { color: rgba(255,255,255,0.85); }
-
-.totals { opacity: 0.75; font-size: 13px; }
-.totals .pos { color: #2ECC71; font-weight: 650; }
-.totals .neg { color: #FF4B4B; font-weight: 650; }
-.totals .neu { color: rgba(255,255,255,0.90); font-weight: 650; }
-
-.badge {
-  display:inline-block; padding:2px 8px; border-radius:12px;
-  font-size:12px; opacity:0.9; border:1px solid rgba(255,255,255,0.15);
-}
-.badge-ok { background: rgba(46, 204, 113, 0.15); }
-.badge-warn { background: rgba(255, 75, 75, 0.15); }
-.badge-neutral { background: rgba(255,255,255,0.08); }
-
-div[data-testid="stSidebar"] .stButton button,
-div[data-testid="stSidebar"] .stDownloadButton button {
-    width: 100%;
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-st.title("Stabler Family Finances")
-
-# ------------------------
+# -----------------------------
 # Helpers
-# ------------------------
-def utc_now_iso():
-    return datetime.now(timezone.utc).isoformat()
+# -----------------------------
+GBP = "GBP"
+USD = "USD"
 
-def sha1_bytes(b: bytes) -> str:
-    return hashlib.sha1(b).hexdigest()
+CURRENCY_SYMBOL = {GBP: "£", USD: "$"}
 
-def safe_float(x, default=0.0):
+
+def parse_money(value) -> float:
+    """
+    Accepts numbers or strings like "£1,234.50" / "$8,803.5" / "8803.50"
+    Returns float. Empty/None -> 0.0
+    """
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip()
+    if s == "":
+        return 0.0
+    # remove currency symbols and spaces
+    s = (
+        s.replace("£", "")
+        .replace("$", "")
+        .replace(",", "")
+        .replace(" ", "")
+        .replace("\u00A0", "")
+    )
+    # handle weird quotes
+    s = s.replace("“", "").replace("”", "").replace('"', "").replace("'", "")
+    # allow parentheses for negatives
+    neg = False
+    if s.startswith("(") and s.endswith(")"):
+        neg = True
+        s = s[1:-1]
     try:
-        if pd.isna(x):
-            return default
-        return float(x)
+        v = float(s)
+        return -v if neg else v
     except Exception:
-        return default
+        return 0.0
 
-def fmt_money(value: float, currency: str) -> str:
-    cur = (currency or "GBP").upper().strip()
-    sym = "£" if cur == "GBP" else "$" if cur == "USD" else f"{cur} "
-    try:
-        return f"{sym}{value:,.2f}"
-    except Exception:
-        return f"{sym}{value}"
 
-@st.cache_data(ttl=60 * 60 * 12)  # cache for 12h
-def get_usd_to_gbp_rate() -> float:
-    # Simple public source; cached so it doesn't hammer requests.
-    # If it ever fails, we fall back to 0.80-ish rather than break the app.
+def fmt_money(amount: float, currency: str) -> str:
+    sym = CURRENCY_SYMBOL.get(currency, "")
+    # accounting style: negative shown as -£1,234.56 (keeps your red/green logic separate)
+    return f"{sym}{amount:,.2f}"
+
+
+def get_usd_to_gbp_rate() -> Tuple[float, str]:
+    """
+    Tries to fetch live USD->GBP FX.
+    Falls back to last cached rate or 0.79 if none exists.
+    """
+    # cache in session
+    if "fx_rate_usd_gbp" not in st.session_state:
+        st.session_state.fx_rate_usd_gbp = 0.79
+        st.session_state.fx_rate_source = "fallback"
+
     try:
-        r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=8)
+        # exchangerate.host is simple and free for basic usage
+        r = requests.get(
+            "https://api.exchangerate.host/latest",
+            params={"base": "USD", "symbols": "GBP"},
+            timeout=6,
+        )
+        r.raise_for_status()
         data = r.json()
-        gbp = data["rates"]["GBP"]
-        return float(gbp)
+        rate = float(data["rates"]["GBP"])
+        st.session_state.fx_rate_usd_gbp = rate
+        st.session_state.fx_rate_source = "exchangerate.host"
     except Exception:
-        return 0.80
+        # keep cached
+        pass
 
-def to_gbp(amount: float, currency: str, usd_to_gbp: float) -> float:
-    cur = (currency or "GBP").upper().strip()
-    if cur == "GBP":
+    return st.session_state.fx_rate_usd_gbp, st.session_state.fx_rate_source
+
+
+def to_gbp(amount: float, currency: str, usd_gbp: float) -> float:
+    if currency == GBP:
         return amount
-    if cur == "USD":
-        return amount * usd_to_gbp
-    # Unknown currency: treat as GBP to avoid surprising zeros
+    if currency == USD:
+        return amount * usd_gbp
     return amount
 
-def ensure_columns(df: pd.DataFrame, cols_with_defaults: dict) -> pd.DataFrame:
-    df = df.copy()
-    for c, d in cols_with_defaults.items():
-        if c not in df.columns:
-            df[c] = d
-    return df
 
-def coerce_schema_state(state: dict) -> dict:
-    # Ensure DataFrames exist and have expected columns.
-    state = dict(state)
-
-    assets = state.get("assets", pd.DataFrame())
-    cards = state.get("credit_cards", pd.DataFrame())
-    reimb = state.get("reimbursements", pd.DataFrame())
-    fixed = state.get("fixed_costs", pd.DataFrame())
-    pay = state.get("pay_cycle", pd.DataFrame())
-    fx = state.get("fx_settings", {"usd_to_gbp_manual": None, "use_live": True})
-
-    # Assets
-    assets = ensure_columns(
-        assets,
-        {
-            "Account": "",
-            "Currency": "GBP",
-            "Balance (native)": 0.0,
-        },
+def colored_metric(label: str, value_str: str, is_negative: bool, help_text: str | None = None):
+    color = "#e85a5a" if is_negative else "#6bd68f"
+    st.markdown(
+        f"""
+        <div style="padding: 10px 4px;">
+          <div style="font-size: 12px; opacity: 0.75;">{label}</div>
+          <div style="font-size: 34px; font-weight: 700; color: {color}; line-height: 1.1;">
+            {value_str}
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-    # Credit cards
-    cards = ensure_columns(
-        cards,
-        {
-            "Card": "",
-            "Currency": "GBP",
-            "Balance (native)": 0.0,
-            "Balance Due (native)": 0.0,
-        },
-    )
-    # Reimbursements (GBP)
-    reimb = ensure_columns(
-        reimb,
-        {
-            "Source": "",
-            "Amount (GBP)": 0.0,
-            "Include?": True,
-        },
-    )
-    # Fixed
-    fixed = ensure_columns(
-        fixed,
-        {
-            "Item": "",
-            "Amount (GBP)": 0.0,
-            "Due?": True,
-        },
-    )
-    # Pay cycle
-    pay = ensure_columns(
-        pay,
-        {
-            "Person": "",
-            "Monthly pay": 0.0,
-            "Paid?": False,
-        },
-    )
+    if help_text:
+        st.caption(help_text)
 
-    # Clean types
-    assets["Currency"] = assets["Currency"].astype(str).str.upper()
-    cards["Currency"] = cards["Currency"].astype(str).str.upper()
 
-    state["assets"] = assets
-    state["credit_cards"] = cards
-    state["reimbursements"] = reimb
-    state["fixed_costs"] = fixed
-    state["pay_cycle"] = pay
-    state["fx_settings"] = fx
-
-    return state
-
-def default_state():
-    # Defaults based on your current setup
+# -----------------------------
+# Default data (fixed rows)
+# -----------------------------
+def default_state() -> Dict[str, pd.DataFrame]:
     assets = pd.DataFrame(
         [
-            {"Account": "HSBC", "Currency": "GBP", "Balance (native)": 0.0},
-            {"Account": "Lloyds", "Currency": "GBP", "Balance (native)": 0.0},
-            {"Account": "Apple Savings", "Currency": "USD", "Balance (native)": 0.0},
+            {"Account": "HSBC", "Currency": GBP, "Balance": 0.0},
+            {"Account": "Lloyds", "Currency": GBP, "Balance": 0.0},
+            {"Account": "Apple Savings", "Currency": USD, "Balance": 0.0},
         ]
     )
 
-    cards = pd.DataFrame(
+    credit_cards = pd.DataFrame(
         [
-            {"Card": "Amex", "Currency": "GBP", "Balance (native)": 0.0, "Balance Due (native)": 0.0},
-            {"Card": "Apple Card", "Currency": "USD", "Balance (native)": 0.0, "Balance Due (native)": 0.0},
-            {"Card": "Lloyds", "Currency": "GBP", "Balance (native)": 0.0, "Balance Due (native)": 0.0},
+            {"Card": "Amex", "Currency": GBP, "Balance": 0.0, "Balance Due": 0.0},
+            {"Card": "Apple Card", "Currency": USD, "Balance": 0.0, "Balance Due": 0.0},
+            {"Card": "Lloyds", "Currency": GBP, "Balance": 0.0, "Balance Due": 0.0},
         ]
     )
 
-    reimb = pd.DataFrame(
+    reimbursements = pd.DataFrame(
         [
-            {"Source": "Eric Work", "Amount (GBP)": 0.0, "Include?": True},
-            {"Source": "Gigi Work", "Amount (GBP)": 0.0, "Include?": True},
-            {"Source": "Misc", "Amount (GBP)": 0.0, "Include?": False},
+            {"Source": "Eric Work", "Amount": 0.0, "Include?": True},
+            {"Source": "Gigi Work", "Amount": 0.0, "Include?": True},
+            {"Source": "Misc", "Amount": 0.0, "Include?": False},
         ]
     )
 
@@ -219,449 +163,370 @@ def default_state():
 
     pay = pd.DataFrame(
         [
-            {"Person": "Eric", "Monthly pay": 6100.0, "Paid?": False},
-            {"Person": "Gigi", "Monthly pay": 6000.0, "Paid?": False},
+            {"Person": "Eric", "Monthly pay (GBP)": 6100.00, "Paid?": False},
+            {"Person": "Gigi", "Monthly pay (GBP)": 6000.00, "Paid?": False},
         ]
     )
 
-    fx = {"usd_to_gbp_manual": None, "use_live": True}
-
     return {
-        "schema_version": SCHEMA_VERSION,
-        "saved_at": utc_now_iso(),
         "assets": assets,
-        "credit_cards": cards,
-        "reimbursements": reimb,
-        "fixed_costs": fixed,
-        "pay_cycle": pay,
-        "fx_settings": fx,
+        "credit_cards": credit_cards,
+        "reimbursements": reimbursements,
+        "fixed": fixed,
+        "pay": pay,
     }
 
-# ------------------------
-# Backup / Restore (ZIP)
-# ------------------------
-def state_to_zip_bytes(state: dict) -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
-        meta = {
-            "schema_version": state.get("schema_version", SCHEMA_VERSION),
-            "saved_at": utc_now_iso(),
-            "fx_settings": state.get("fx_settings", {"usd_to_gbp_manual": None, "use_live": True}),
-        }
-        z.writestr("meta.json", pd.Series(meta).to_json())
 
-        for name, df in [
-            ("assets.csv", state["assets"]),
-            ("credit_cards.csv", state["credit_cards"]),
-            ("reimbursements.csv", state["reimbursements"]),
-            ("fixed_costs.csv", state["fixed_costs"]),
-            ("pay_cycle.csv", state["pay_cycle"]),
-        ]:
-            z.writestr(name, df.to_csv(index=False))
+def ensure_state():
+    if "app_state" not in st.session_state:
+        st.session_state.app_state = default_state()
+
+
+def state_to_zip_bytes(state: Dict[str, pd.DataFrame]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        meta = {"version": 1, "tables": list(state.keys())}
+        zf.writestr("meta.json", json.dumps(meta, indent=2))
+        for name, df in state.items():
+            zf.writestr(f"{name}.csv", df.to_csv(index=False))
     return buf.getvalue()
 
-def zip_bytes_to_state(b: bytes) -> dict:
-    with zipfile.ZipFile(io.BytesIO(b), "r") as z:
-        state = default_state()
-        try:
-            meta_raw = z.read("meta.json")
-            meta = pd.read_json(io.BytesIO(meta_raw), typ="series")
-            fx_settings = meta.get("fx_settings", state["fx_settings"])
-            state["fx_settings"] = fx_settings if isinstance(fx_settings, dict) else state["fx_settings"]
-        except Exception:
-            pass
 
-        def read_csv(name):
-            try:
-                return pd.read_csv(io.BytesIO(z.read(name)))
-            except Exception:
+def zip_bytes_to_state(b: bytes) -> Dict[str, pd.DataFrame] | None:
+    try:
+        with zipfile.ZipFile(io.BytesIO(b), "r") as zf:
+            names = set(zf.namelist())
+            required = {"assets.csv", "credit_cards.csv", "reimbursements.csv", "fixed.csv", "pay.csv"}
+            if not required.issubset(names):
                 return None
 
-        for key, fname in [
-            ("assets", "assets.csv"),
-            ("credit_cards", "credit_cards.csv"),
-            ("reimbursements", "reimbursements.csv"),
-            ("fixed_costs", "fixed_costs.csv"),
-            ("pay_cycle", "pay_cycle.csv"),
-        ]:
-            df = read_csv(fname)
-            if df is not None:
-                state[key] = df
+            def read_csv(path: str) -> pd.DataFrame:
+                return pd.read_csv(io.BytesIO(zf.read(path)))
 
-        state["schema_version"] = state.get("schema_version", SCHEMA_VERSION)
-        state["saved_at"] = utc_now_iso()
-        return coerce_schema_state(state)
+            s = {
+                "assets": read_csv("assets.csv"),
+                "credit_cards": read_csv("credit_cards.csv"),
+                "reimbursements": read_csv("reimbursements.csv"),
+                "fixed": read_csv("fixed.csv"),
+                "pay": read_csv("pay.csv"),
+            }
 
-# ------------------------
-# Init session state
-# ------------------------
-if "app_state" not in st.session_state:
-    st.session_state.app_state = coerce_schema_state(default_state())
+            # light normalization
+            # assets
+            s["assets"]["Balance"] = s["assets"]["Balance"].apply(parse_money)
+            # credit cards
+            s["credit_cards"]["Balance"] = s["credit_cards"]["Balance"].apply(parse_money)
+            s["credit_cards"]["Balance Due"] = s["credit_cards"]["Balance Due"].apply(parse_money)
+            # reimbursements
+            s["reimbursements"]["Amount"] = s["reimbursements"]["Amount"].apply(parse_money)
+            s["reimbursements"]["Include?"] = s["reimbursements"]["Include?"].astype(bool)
+            # fixed
+            s["fixed"]["Amount (GBP)"] = s["fixed"]["Amount (GBP)"].apply(parse_money)
+            s["fixed"]["Due?"] = s["fixed"]["Due?"].astype(bool)
+            # pay
+            s["pay"]["Monthly pay (GBP)"] = s["pay"]["Monthly pay (GBP)"].apply(parse_money)
+            s["pay"]["Paid?"] = s["pay"]["Paid?"].astype(bool)
 
-# ------------------------
+            return s
+    except Exception:
+        return None
+
+
+# -----------------------------
+# App
+# -----------------------------
+ensure_state()
+
+st.title("Stabler Family Finances")
+
 # Sidebar: Save / Load
-# ------------------------
 with st.sidebar:
     st.subheader("Save / Load")
 
     backup_bytes = state_to_zip_bytes(st.session_state.app_state)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     st.download_button(
         "⬇️ Download backup (ZIP)",
         data=backup_bytes,
-        file_name=f"stabler-finances-backup-{stamp}.zip",
+        file_name="stabler-finances-backup.zip",
         mime="application/zip",
+        use_container_width=True,
     )
 
     uploaded = st.file_uploader("Restore from backup (ZIP)", type=["zip"])
     if uploaded is not None:
-        try:
-            b = uploaded.read()
-            st.session_state.app_state = zip_bytes_to_state(b)
+        restored = zip_bytes_to_state(uploaded.read())
+        if restored is None:
+            st.error("That ZIP doesn’t match the expected backup format.")
+        else:
+            st.session_state.app_state = restored
             st.success("Backup restored.")
-        except Exception as e:
-            st.error(f"Restore failed: {e}")
+            st.rerun()
 
     st.divider()
-    if st.button("Reset to defaults"):
-        st.session_state.app_state = coerce_schema_state(default_state())
-        st.success("Reset complete.")
+    if st.button("Reset to defaults", use_container_width=True):
+        st.session_state.app_state = default_state()
+        st.success("Reset.")
+        st.rerun()
 
-# ------------------------
-# FX settings
-# ------------------------
-state = st.session_state.app_state
-fx = state.get("fx_settings", {"usd_to_gbp_manual": None, "use_live": True})
-use_live = bool(fx.get("use_live", True))
-manual_rate = fx.get("usd_to_gbp_manual", None)
+# FX
+usd_gbp, fx_source = get_usd_to_gbp_rate()
 
-live_rate = get_usd_to_gbp_rate()
-usd_to_gbp = live_rate if use_live else (safe_float(manual_rate, live_rate) if manual_rate is not None else live_rate)
+assets_df = st.session_state.app_state["assets"].copy()
+cards_df = st.session_state.app_state["credit_cards"].copy()
+reimb_df = st.session_state.app_state["reimbursements"].copy()
+fixed_df = st.session_state.app_state["fixed"].copy()
+pay_df = st.session_state.app_state["pay"].copy()
 
-# ------------------------
-# Compute totals
-# ------------------------
-assets_df = state["assets"].copy()
-cards_df = state["credit_cards"].copy()
-reimb_df = state["reimbursements"].copy()
-fixed_df = state["fixed_costs"].copy()
-pay_df = state["pay_cycle"].copy()
-
-# Coerce numeric columns
-assets_df["Balance (native)"] = assets_df["Balance (native)"].apply(safe_float)
-cards_df["Balance (native)"] = cards_df["Balance (native)"].apply(safe_float)
-cards_df["Balance Due (native)"] = cards_df["Balance Due (native)"].apply(safe_float)
-reimb_df["Amount (GBP)"] = reimb_df["Amount (GBP)"].apply(safe_float)
-fixed_df["Amount (GBP)"] = fixed_df["Amount (GBP)"].apply(safe_float)
-pay_df["Monthly pay"] = pay_df["Monthly pay"].apply(safe_float)
-pay_df["Paid?"] = pay_df["Paid?"].fillna(False).astype(bool)
-
+# Compute totals in GBP
 assets_total_gbp = float(
-    sum(
-        to_gbp(row["Balance (native)"], row["Currency"], usd_to_gbp)
-        for _, row in assets_df.iterrows()
-    )
+    assets_df.apply(lambda r: to_gbp(parse_money(r["Balance"]), r["Currency"], usd_gbp), axis=1).sum()
 )
 
-card_balances_gbp = float(
-    sum(
-        to_gbp(row["Balance (native)"], row["Currency"], usd_to_gbp)
-        for _, row in cards_df.iterrows()
-    )
-)
-card_due_gbp = float(
-    sum(
-        to_gbp(row["Balance Due (native)"], row["Currency"], usd_to_gbp)
-        for _, row in cards_df.iterrows()
-    )
+cards_balance_total_gbp = float(
+    cards_df.apply(lambda r: to_gbp(parse_money(r["Balance"]), r["Currency"], usd_gbp), axis=1).sum()
 )
 
-included_reimb_gbp = float(reimb_df.loc[reimb_df["Include?"] == True, "Amount (GBP)"].sum())
-fixed_due_gbp = float(fixed_df.loc[fixed_df["Due?"] == True, "Amount (GBP)"].sum())
-paid_income_gbp = float(pay_df.loc[pay_df["Paid?"] == True, "Monthly pay"].sum())
+cards_due_total_gbp = float(
+    cards_df.apply(lambda r: to_gbp(parse_money(r["Balance Due"]), r["Currency"], usd_gbp), axis=1).sum()
+)
 
-# KPIs:
-net_cash_gbp = assets_total_gbp - card_balances_gbp
-remaining_spend_gbp = net_cash_gbp + (paid_income_gbp - fixed_due_gbp)
+reimb_included_gbp = float(
+    reimb_df[reimb_df["Include?"] == True]["Amount"].apply(parse_money).sum()
+)
 
-ability_to_repay = "Yes" if (assets_total_gbp - card_due_gbp) >= 0 else "No"
+net_cash_gbp = assets_total_gbp + reimb_included_gbp - cards_balance_total_gbp
 
-# ------------------------
-# KPIs UI
-# ------------------------
-k1, k2, k3 = st.columns(3)
+fixed_due_total_gbp = float(fixed_df[fixed_df["Due?"] == True]["Amount (GBP)"].apply(parse_money).sum())
 
-def kpi(label, value, is_money=True):
-    if is_money:
-        text = fmt_money(value, "GBP")
-    else:
-        text = str(value)
+pay_selected_total_gbp = float(pay_df[pay_df["Paid?"] == True]["Monthly pay (GBP)"].apply(parse_money).sum())
 
-    cls = "neu"
-    if is_money:
-        if value > 0:
-            cls = "pos"
-        elif value < 0:
-            cls = "neg"
+remaining_spend_gbp = net_cash_gbp + (pay_selected_total_gbp - fixed_due_total_gbp)
 
+ability_to_repay = (assets_total_gbp - cards_due_total_gbp) >= 0
+
+# Top metrics row
+c1, c2, c3 = st.columns(3)
+
+with c1:
+    colored_metric(
+        "Net Cash (GBP)",
+        fmt_money(net_cash_gbp, GBP),
+        is_negative=(net_cash_gbp < 0),
+    )
+
+with c2:
     st.markdown(
         f"""
-<div class="kpi">
-  <div class="label">{label}</div>
-  <div class="value {cls}">{text}</div>
-</div>
-""",
+        <div style="padding: 10px 4px;">
+          <div style="font-size: 12px; opacity: 0.75;">Total Credit Card Bill Due (GBP)</div>
+          <div style="font-size: 34px; font-weight: 700; line-height: 1.1;">
+            {fmt_money(cards_due_total_gbp, GBP)}
+          </div>
+          <div style="margin-top: 6px; font-size: 12px; opacity: 0.85;">
+            Ability to repay: <b>{"Yes" if ability_to_repay else "No"}</b>
+          </div>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
-with k1:
-    kpi("Net Cash (GBP)", net_cash_gbp)
-
-with k2:
-    st.markdown(
-        f"""
-<div class="kpi">
-  <div class="label">Total Credit Card Bill Due (GBP)</div>
-  <div class="value neu">{fmt_money(card_due_gbp, "GBP")}</div>
-  <div style="margin-top:8px;">
-    <span class="badge {'badge-ok' if ability_to_repay=='Yes' else 'badge-warn'}">
-      Ability to repay: {ability_to_repay}
-    </span>
-  </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-with k3:
-    # Remaining spending this month
-    cls = "pos" if remaining_spend_gbp > 0 else "neg" if remaining_spend_gbp < 0 else "neu"
-    st.markdown(
-        f"""
-<div class="kpi">
-  <div class="label">Remaining spending this month (GBP)</div>
-  <div class="value {cls}">{fmt_money(remaining_spend_gbp, "GBP")}</div>
-</div>
-""",
-        unsafe_allow_html=True,
+with c3:
+    colored_metric(
+        "Remaining spending this month (GBP)",
+        fmt_money(remaining_spend_gbp, GBP),
+        is_negative=(remaining_spend_gbp < 0),
     )
 
 st.divider()
 
-# ------------------------
-# Editable tables (NO row add for Assets/Cards/Reimb)
-# Show currency symbol in main area via read-only display columns
-# ------------------------
-a_col, c_col, r_col = st.columns(3)
+# -----------------------------
+# Editable tables (NO native views; symbols shown directly)
+# We store numeric values, but display/edit as formatted strings to get £/$ per row.
+# Apply buttons commit parsed numbers back into state.
+# -----------------------------
 
-# Prepare display columns
-assets_display = assets_df.copy()
-assets_display["Balance"] = assets_display.apply(
-    lambda r: fmt_money(r["Balance (native)"], r["Currency"]), axis=1
-)
-
-cards_display = cards_df.copy()
-cards_display["Balance"] = cards_display.apply(
-    lambda r: fmt_money(r["Balance (native)"], r["Currency"]), axis=1
-)
-cards_display["Balance Due"] = cards_display.apply(
-    lambda r: fmt_money(r["Balance Due (native)"], r["Currency"]), axis=1
-)
-
-reimb_display = reimb_df.copy()
-reimb_display["Amount"] = reimb_display["Amount (GBP)"].apply(lambda v: fmt_money(v, "GBP"))
+row1a, row1b, row1c = st.columns(3)
 
 # ASSETS
-with a_col:
+with row1a:
     st.subheader("Assets")
 
-    edited_assets = st.data_editor(
-        assets_display[["Account", "Currency", "Balance", "Balance (native)"]],
-        hide_index=True,
-        num_rows="fixed",
-        key="assets_editor",
-        disabled=["Balance"],  # read-only formatted display
-        column_config={
-            "Account": st.column_config.TextColumn("Account", required=True),
-            "Currency": st.column_config.SelectboxColumn("Currency", options=["GBP", "USD"], required=True),
-            "Balance": st.column_config.TextColumn("Balance", help="Formatted display (read-only)"),
-            # IMPORTANT: no commas here, Streamlit NumberColumn format cannot support %,.
-            "Balance (native)": st.column_config.NumberColumn("Balance (native)", format="%.2f"),
-        },
-        use_container_width=True,
+    assets_edit = assets_df.copy()
+    # Display string with symbol (editable text so each row can show its own symbol)
+    assets_edit["Balance"] = assets_edit.apply(
+        lambda r: fmt_money(parse_money(r["Balance"]), r["Currency"]),
+        axis=1,
     )
 
-    if st.button("Apply Assets Changes", key="apply_assets"):
-        # Write back only editable numeric + currency/account
-        new_assets = edited_assets.copy()
-        new_assets = ensure_columns(new_assets, {"Account": "", "Currency": "GBP", "Balance (native)": 0.0})
-        # Drop display column if present
-        if "Balance" in new_assets.columns:
-            new_assets = new_assets.drop(columns=["Balance"])
+    edited_assets = st.data_editor(
+        assets_edit[["Account", "Currency", "Balance"]],
+        hide_index=True,
+        num_rows="fixed",
+        use_container_width=True,
+        column_config={
+            "Account": st.column_config.TextColumn("Account", disabled=True),
+            "Currency": st.column_config.TextColumn("Currency", disabled=True),
+            "Balance": st.column_config.TextColumn("Balance"),
+        },
+        key="assets_editor",
+    )
+
+    if st.button("Apply Assets Changes", use_container_width=True):
+        new_assets = assets_df.copy()
+        # parse the edited text back into numeric
+        new_assets["Balance"] = edited_assets["Balance"].apply(parse_money)
         st.session_state.app_state["assets"] = new_assets
         st.rerun()
 
-    total_assets_cls = "pos" if assets_total_gbp > 0 else "neg" if assets_total_gbp < 0 else "neu"
-    st.markdown(
-        f"""<div class="totals">Total Assets (GBP): <span class="{total_assets_cls}">{fmt_money(assets_total_gbp, "GBP")}</span></div>""",
-        unsafe_allow_html=True,
-    )
+    st.caption(f"Total Assets (GBP): **{fmt_money(assets_total_gbp, GBP)}**")
 
-# CREDIT CARDS (only: Card, Balance, Balance Due — plus Currency kept but you can hide it if you want)
-with c_col:
+# CREDIT CARDS
+with row1b:
     st.subheader("Credit Cards")
 
-    # You asked: columns should be card, balance, balance due.
-    # We keep Currency hidden in the editor by not displaying it, but we still store/use it.
-    # To allow changing currency later, swap the displayed columns to include Currency.
-    cards_for_editor = cards_display[["Card", "Balance", "Balance Due", "Currency", "Balance (native)", "Balance Due (native)"]].copy()
+    cards_edit = cards_df.copy()
 
-    edited_cards = st.data_editor(
-        cards_for_editor[["Card", "Balance", "Balance Due", "Balance (native)", "Balance Due (native)"]],
-        hide_index=True,
-        num_rows="fixed",
-        key="cards_editor",
-        disabled=["Balance", "Balance Due"],  # read-only formatted display
-        column_config={
-            "Card": st.column_config.TextColumn("Card", required=True),
-            "Balance": st.column_config.TextColumn("Balance", help="Formatted display (read-only)"),
-            "Balance Due": st.column_config.TextColumn("Balance Due", help="Formatted display (read-only)"),
-            "Balance (native)": st.column_config.NumberColumn("Balance (native)", format="%.2f"),
-            "Balance Due (native)": st.column_config.NumberColumn("Balance Due (native)", format="%.2f"),
-        },
-        use_container_width=True,
+    cards_edit["Balance"] = cards_edit.apply(
+        lambda r: fmt_money(parse_money(r["Balance"]), r["Currency"]),
+        axis=1,
+    )
+    cards_edit["Balance Due"] = cards_edit.apply(
+        lambda r: fmt_money(parse_money(r["Balance Due"]), r["Currency"]),
+        axis=1,
     )
 
-    if st.button("Apply Credit Card Changes", key="apply_cards"):
-        # Merge edits back into original to keep Currency per row
-        merged = cards_df.copy()
-        # assume same row order/length (fixed rows)
-        merged["Card"] = edited_cards["Card"]
-        merged["Balance (native)"] = edited_cards["Balance (native)"]
-        merged["Balance Due (native)"] = edited_cards["Balance Due (native)"]
-        st.session_state.app_state["credit_cards"] = merged
+    edited_cards = st.data_editor(
+        cards_edit[["Card", "Balance", "Balance Due"]],
+        hide_index=True,
+        num_rows="fixed",
+        use_container_width=True,
+        column_config={
+            "Card": st.column_config.TextColumn("Card", disabled=True),
+            "Balance": st.column_config.TextColumn("Balance"),
+            "Balance Due": st.column_config.TextColumn("Balance Due"),
+        },
+        key="cards_editor",
+    )
+
+    if st.button("Apply Credit Card Changes", use_container_width=True):
+        new_cards = cards_df.copy()
+        new_cards["Balance"] = edited_cards["Balance"].apply(parse_money)
+        new_cards["Balance Due"] = edited_cards["Balance Due"].apply(parse_money)
+        st.session_state.app_state["credit_cards"] = new_cards
         st.rerun()
 
-    st.markdown(
-        f"""<div class="totals">
-Total Card Balances (GBP): <span class="neu">{fmt_money(card_balances_gbp, "GBP")}</span> ·
-Total Bills Due (GBP): <span class="neu">{fmt_money(card_due_gbp, "GBP")}</span>
-</div>""",
-        unsafe_allow_html=True,
+    st.caption(
+        f"Total Card Balances (GBP): **{fmt_money(cards_balance_total_gbp, GBP)}** · "
+        f"Total Bills Due (GBP): **{fmt_money(cards_due_total_gbp, GBP)}**"
     )
 
 # REIMBURSEMENTS
-with r_col:
+with row1c:
     st.subheader("Reimbursement Pending")
 
+    reimb_edit = reimb_df.copy()
+    reimb_edit["Amount"] = reimb_edit["Amount"].apply(lambda v: fmt_money(parse_money(v), GBP))
+
     edited_reimb = st.data_editor(
-        reimb_display[["Source", "Amount", "Amount (GBP)", "Include?"]],
+        reimb_edit[["Source", "Amount", "Include?"]],
         hide_index=True,
         num_rows="fixed",
-        key="reimb_editor",
-        disabled=["Amount"],  # formatted display read-only
+        use_container_width=True,
         column_config={
-            "Source": st.column_config.TextColumn("Source", required=True),
-            "Amount": st.column_config.TextColumn("Amount", help="Formatted display (read-only)"),
-            "Amount (GBP)": st.column_config.NumberColumn("Amount (GBP)", format="%.2f"),
+            "Source": st.column_config.TextColumn("Source", disabled=True),
+            "Amount": st.column_config.TextColumn("Amount"),
             "Include?": st.column_config.CheckboxColumn("Include?"),
         },
-        use_container_width=True,
+        key="reimb_editor",
     )
 
-    if st.button("Apply Reimbursement Changes", key="apply_reimb"):
-        new_reimb = edited_reimb.copy()
-        if "Amount" in new_reimb.columns:
-            new_reimb = new_reimb.drop(columns=["Amount"])
+    if st.button("Apply Reimbursement Changes", use_container_width=True):
+        new_reimb = reimb_df.copy()
+        new_reimb["Amount"] = edited_reimb["Amount"].apply(parse_money)
+        new_reimb["Include?"] = edited_reimb["Include?"].astype(bool)
         st.session_state.app_state["reimbursements"] = new_reimb
         st.rerun()
 
-    cls = "pos" if included_reimb_gbp > 0 else "neg" if included_reimb_gbp < 0 else "neu"
-    st.markdown(
-        f"""<div class="totals">Included Reimbursements (GBP): <span class="{cls}">{fmt_money(included_reimb_gbp, "GBP")}</span></div>""",
-        unsafe_allow_html=True,
-    )
+    st.caption(f"Included Reimbursements (GBP): **{fmt_money(reimb_included_gbp, GBP)}**")
 
 st.divider()
 
-# ------------------------
-# Monthly Fixed + Pay Cycle
-# ------------------------
-left, right = st.columns([2, 1])
+# Row 2: Monthly Fixed (left) + Pay Cycle (right)
+row2a, row2b = st.columns([2, 1])
 
-with left:
+with row2a:
     st.subheader("Monthly Fixed")
 
+    fixed_edit = fixed_df.copy()
+    fixed_edit["Amount (GBP)"] = fixed_edit["Amount (GBP)"].apply(lambda v: float(parse_money(v)))
+
     edited_fixed = st.data_editor(
-        fixed_df,
-        hide_index=True,
-        num_rows="dynamic",
-        key="fixed_editor",
-        column_config={
-            "Item": st.column_config.TextColumn("Item", required=True),
-            "Amount (GBP)": st.column_config.NumberColumn("Amount (GBP)", format="%.2f"),
-            "Due?": st.column_config.CheckboxColumn("Due?"),
-        },
-        use_container_width=True,
-    )
-
-    if st.button("Apply Monthly Fixed Changes", key="apply_fixed"):
-        st.session_state.app_state["fixed_costs"] = edited_fixed
-        st.rerun()
-
-    cls = "neg" if fixed_due_gbp > 0 else "neu"
-    st.markdown(
-        f"""<div class="totals">Fixed due this month (GBP): <span class="{cls}">{fmt_money(fixed_due_gbp, "GBP")}</span></div>""",
-        unsafe_allow_html=True,
-    )
-
-with right:
-    st.subheader("Pay Cycle (setup)")
-    st.caption("Monthly pay — tick Paid? to include in this month’s calculations.")
-
-    edited_pay = st.data_editor(
-        pay_df[["Person", "Monthly pay", "Paid?"]],
+        fixed_edit[["Item", "Amount (GBP)", "Due?"]],
         hide_index=True,
         num_rows="fixed",
-        key="pay_editor",
-        column_config={
-            "Person": st.column_config.TextColumn("Person", required=True),
-            "Monthly pay": st.column_config.NumberColumn("Monthly pay", format="%.2f"),
-            "Paid?": st.column_config.CheckboxColumn("Paid?"),
-        },
         use_container_width=True,
+        column_config={
+            "Item": st.column_config.TextColumn("Item", disabled=True),
+            "Amount (GBP)": st.column_config.NumberColumn("Amount (GBP)", format="%,.2f"),
+            "Due?": st.column_config.CheckboxColumn("Due?"),
+        },
+        key="fixed_editor",
     )
 
-    if st.button("Apply Pay Cycle Changes", key="apply_pay"):
-        st.session_state.app_state["pay_cycle"] = edited_pay
+    if st.button("Apply Monthly Fixed Changes", use_container_width=True):
+        new_fixed = fixed_df.copy()
+        new_fixed["Amount (GBP)"] = edited_fixed["Amount (GBP)"].apply(parse_money)
+        new_fixed["Due?"] = edited_fixed["Due?"].astype(bool)
+        st.session_state.app_state["fixed"] = new_fixed
         st.rerun()
 
-    cls = "pos" if paid_income_gbp > 0 else "neu"
-    st.markdown(
-        f"""<div class="totals">Included paid income (GBP): <span class="{cls}">{fmt_money(paid_income_gbp, "GBP")}</span></div>""",
-        unsafe_allow_html=True,
+    st.caption(f"Fixed due total (GBP): **{fmt_money(fixed_due_total_gbp, GBP)}**")
+
+with row2b:
+    st.subheader("Pay Cycle (setup)")
+
+    pay_edit = pay_df.copy()
+    pay_edit["Monthly pay (GBP)"] = pay_edit["Monthly pay (GBP)"].apply(lambda v: float(parse_money(v)))
+
+    edited_pay = st.data_editor(
+        pay_edit[["Person", "Monthly pay (GBP)", "Paid?"]],
+        hide_index=True,
+        num_rows="fixed",
+        use_container_width=True,
+        column_config={
+            "Person": st.column_config.TextColumn("Person", disabled=True),
+            "Monthly pay (GBP)": st.column_config.NumberColumn("Monthly pay (GBP)", format="%,.2f"),
+            "Paid?": st.column_config.CheckboxColumn("Paid?"),
+        },
+        key="pay_editor",
     )
+
+    if st.button("Apply Pay Changes", use_container_width=True):
+        new_pay = pay_df.copy()
+        new_pay["Monthly pay (GBP)"] = edited_pay["Monthly pay (GBP)"].apply(parse_money)
+        new_pay["Paid?"] = edited_pay["Paid?"].astype(bool)
+        st.session_state.app_state["pay"] = new_pay
+        st.rerun()
+
+    st.caption(f"Included pay this month (GBP): **{fmt_money(pay_selected_total_gbp, GBP)}**")
 
 st.divider()
 
-# ------------------------
-# FX (bottom)
-# ------------------------
-st.subheader("FX (USD → GBP)")
-st.caption("Used to convert USD balances (Apple Savings / Apple Card) into GBP for totals.")
+# FX section at bottom (as requested)
+st.subheader("FX (for USD accounts/cards)")
+col_fx1, col_fx2 = st.columns([1, 3])
+with col_fx1:
+    if st.button("Refresh FX rate", use_container_width=True):
+        # force refresh attempt
+        st.session_state.fx_rate_usd_gbp = None  # type: ignore
+        # re-init in getter
+        if "fx_rate_usd_gbp" in st.session_state:
+            del st.session_state["fx_rate_usd_gbp"]
+        if "fx_rate_source" in st.session_state:
+            del st.session_state["fx_rate_source"]
+        usd_gbp, fx_source = get_usd_to_gbp_rate()
+        st.rerun()
 
-fx1, fx2, fx3 = st.columns([1, 1, 2])
-with fx1:
-    use_live_new = st.toggle("Use live USD→GBP rate", value=use_live, key="fx_use_live")
-with fx2:
-    manual = st.number_input("Manual USD→GBP rate (if not live)", value=float(usd_to_gbp), step=0.01, format="%.4f")
-with fx3:
-    st.write(f"Live rate (cached): **{live_rate:.4f}**")
-    st.write(f"Currently using: **{(live_rate if use_live_new else manual):.4f}**")
-
-if st.button("Apply FX Settings"):
-    st.session_state.app_state["fx_settings"] = {
-        "use_live": bool(use_live_new),
-        "usd_to_gbp_manual": float(manual),
-    }
-    st.rerun()
+with col_fx2:
+    st.write(f"USD→GBP rate used: **{usd_gbp:.6f}** (source: {fx_source})")
+    st.caption("This rate is used only for GBP totals and top summary calculations.")
