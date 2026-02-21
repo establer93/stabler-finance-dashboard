@@ -9,7 +9,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 
-SCHEMA_VERSION = "2026-02-21-stabler-finances-stable-v6-fx-refresh-button"
+SCHEMA_VERSION = "2026-02-21-stabler-finances-stable-v6-fx-provider-erapi-timestamp"
 
 GBP = "GBP"
 USD = "USD"
@@ -129,11 +129,20 @@ def fmt_money(amount: float, currency: str) -> str:
     sym = CURRENCY_SYMBOL.get((currency or GBP).upper(), "")
     return f"{sym}{float(amount):,.2f}"
 
-@st.cache_data(ttl=60 * 60)  # 1 hour
+# ------------------------
+# FX feed (UPDATED PROVIDER + 60s cache)
+# ------------------------
+@st.cache_data(ttl=60)  # refresh at most once per minute
 def fetch_usd_to_gbp() -> float:
-    r = requests.get("https://api.exchangerate.host/latest", params={"base": "USD", "symbols": "GBP"}, timeout=8)
+    # ExchangeRate-API community endpoint (no key)
+    r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=8)
     r.raise_for_status()
-    return float(r.json()["rates"]["GBP"])
+    data = r.json()
+    rates = data.get("rates", {})
+    gbp = rates.get("GBP", None)
+    if gbp is None:
+        raise ValueError("GBP rate missing in FX response")
+    return float(gbp)
 
 def get_usd_to_gbp_rate() -> float:
     try:
@@ -450,7 +459,14 @@ with st.sidebar:
 state = st.session_state.app_state
 fx_cfg = state.get("fx", {"use_live": True, "manual_usd_gbp": 0.80})
 
+# Store a "last refreshed" timestamp in session when we actually *pull* FX.
+# - It will still auto-refresh via cache every 60s, but this gives you a visible "last pull".
+if "fx_last_refresh_local" not in st.session_state:
+    st.session_state.fx_last_refresh_local = None
+
 usd_to_gbp_live = get_usd_to_gbp_rate()
+
+# If you are using live FX, totals use usd_to_gbp_live. Otherwise manual.
 usd_to_gbp = usd_to_gbp_live if fx_cfg.get("use_live", True) else float(fx_cfg.get("manual_usd_gbp", 0.80))
 
 # ------------------------
@@ -473,9 +489,15 @@ rac_due_this_month_gbp = float(rac_df.loc[rac_df["Month"] == THIS_MONTH, "Amount
 # ------------------------
 # Calculations
 # ------------------------
-assets_total_gbp = float(sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in assets_df.iterrows()))
-cards_balance_total_gbp = float(sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows()))
-cards_due_total_gbp = float(sum(to_gbp(parse_money(r["Balance Due"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows()))
+assets_total_gbp = float(
+    sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in assets_df.iterrows())
+)
+cards_balance_total_gbp = float(
+    sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows())
+)
+cards_due_total_gbp = float(
+    sum(to_gbp(parse_money(r["Balance Due"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows())
+)
 
 reim_included_gbp = float(reim_df.loc[reim_df["Include?"] == True, "Amount"].apply(parse_money).sum())  # noqa: E712
 fixed_due_gbp = float(fixed_df.loc[fixed_df["Due?"] == True, "Amount"].sum())  # noqa: E712
@@ -724,7 +746,7 @@ with e:
 st.divider()
 
 # ------------------------
-# FX bottom (with refresh button)
+# FX bottom (UPDATED: refresh button + timestamp)
 # ------------------------
 st.subheader("FX (USD → GBP)")
 st.caption("Used only for converting USD balances (Apple Savings / Apple Card) into GBP totals.")
@@ -737,11 +759,14 @@ with fxl:
         unsafe_allow_html=True,
     )
 
+    if st.session_state.fx_last_refresh_local is not None:
+        st.caption(f"Last refreshed: {st.session_state.fx_last_refresh_local}")
+
     if st.button("🔄 Pull current rate", use_container_width=True):
-        try:
-            fetch_usd_to_gbp.clear()
-        except Exception:
-            pass
+        # Force a fresh HTTP call on next run
+        fetch_usd_to_gbp.clear()
+        # Record local timestamp (London-ish display; no tz lib needed)
+        st.session_state.fx_last_refresh_local = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         st.rerun()
 
 with fxr:
