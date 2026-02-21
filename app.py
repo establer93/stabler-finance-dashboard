@@ -9,7 +9,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 
-SCHEMA_VERSION = "2026-02-21-zip-polish-v1"  # bump this if we ever change file structure
+SCHEMA_VERSION = "2026-02-21-zip-polish-v3-forms-fixedrows"
 
 # ------------------------
 # Styling (colours)
@@ -191,9 +191,11 @@ def normalize_cards(df: pd.DataFrame) -> pd.DataFrame:
     if "Balance Due (native)" not in df.columns:
         df["Balance Due (native)"] = 0.0
 
+    df["Card"] = df["Card"].astype(str).str.strip()
     df["Balance (native)"] = _to_float(df["Balance (native)"])
     df["Balance Due (native)"] = _to_float(df["Balance Due (native)"])
 
+    # Only keep the 3 fields you want
     return df[["Card", "Balance (native)", "Balance Due (native)"]]
 
 def normalize_reim(df: pd.DataFrame) -> pd.DataFrame:
@@ -210,6 +212,7 @@ def normalize_reim(df: pd.DataFrame) -> pd.DataFrame:
     if "Include?" not in df.columns:
         df["Include?"] = False
 
+    df["Source"] = df["Source"].astype(str).str.strip()
     df["Amount (GBP)"] = _to_float(df["Amount (GBP)"])
     df["Include?"] = _coerce_bool_col(df["Include?"], default=False)
     return df[["Source", "Amount (GBP)", "Include?"]]
@@ -228,6 +231,7 @@ def normalize_fixed(df: pd.DataFrame) -> pd.DataFrame:
     if "Due?" not in df.columns:
         df["Due?"] = True
 
+    df["Item"] = df["Item"].astype(str).str.strip()
     df["Amount (GBP)"] = _to_float(df["Amount (GBP)"])
     df["Due?"] = _coerce_bool_col(df["Due?"], default=True)
     return df[["Item", "Amount (GBP)", "Due?"]]
@@ -246,6 +250,7 @@ def normalize_pay(df: pd.DataFrame) -> pd.DataFrame:
 
     if "Person" not in df.columns:
         df["Person"] = ""
+
     if "Monthly Pay (GBP)" not in df.columns:
         df["Monthly Pay (GBP)"] = 0.0
 
@@ -257,39 +262,90 @@ def normalize_pay(df: pd.DataFrame) -> pd.DataFrame:
         else:
             df["Paid?"] = False
 
+    df["Person"] = df["Person"].astype(str).str.strip()
     df["Monthly Pay (GBP)"] = _to_float(df["Monthly Pay (GBP)"])
     df["Paid?"] = _coerce_bool_col(df["Paid?"], default=False)
 
     return df[["Person", "Monthly Pay (GBP)", "Paid?"]]
 
 # ------------------------
-# Defaults
+# Fixed row enforcement (no adding rows)
+# ------------------------
+ASSET_ACCOUNTS = [
+    ("HSBC", "GBP"),
+    ("Lloyds", "GBP"),
+    ("Apple Savings", "USD"),
+]
+
+CARD_LIST = [
+    "Amex",
+    "Apple Card",
+    "Lloyds",
+]
+
+REIM_LIST = [
+    "Eric Work",
+    "Gigi Work",
+    "Misc",
+]
+
+PAY_LIST = [
+    ("Eric", 6100.0),
+    ("Gigi", 6000.0),
+]
+
+def enforce_assets_fixed(df: pd.DataFrame) -> pd.DataFrame:
+    df = normalize_assets(df)
+    # build lookup by Account
+    out_rows = []
+    for acct, cur in ASSET_ACCOUNTS:
+        match = df[df["Account"].str.lower() == acct.lower()]
+        bal = float(match["Balance (native)"].iloc[0]) if len(match) else 0.0
+        # Keep currency from config (forces consistency)
+        out_rows.append({"Account": acct, "Currency": cur, "Balance (native)": bal})
+    return pd.DataFrame(out_rows)
+
+def enforce_cards_fixed(df: pd.DataFrame) -> pd.DataFrame:
+    df = normalize_cards(df)
+    out_rows = []
+    for card in CARD_LIST:
+        match = df[df["Card"].str.lower() == card.lower()]
+        bal = float(match["Balance (native)"].iloc[0]) if len(match) else 0.0
+        due = float(match["Balance Due (native)"].iloc[0]) if len(match) else 0.0
+        out_rows.append({"Card": card, "Balance (native)": bal, "Balance Due (native)": due})
+    return pd.DataFrame(out_rows)
+
+def enforce_reim_fixed(df: pd.DataFrame) -> pd.DataFrame:
+    df = normalize_reim(df)
+    out_rows = []
+    for src in REIM_LIST:
+        match = df[df["Source"].str.lower() == src.lower()]
+        amt = float(match["Amount (GBP)"].iloc[0]) if len(match) else 0.0
+        inc = bool(match["Include?"].iloc[0]) if len(match) else (src != "Misc")
+        out_rows.append({"Source": src, "Amount (GBP)": amt, "Include?": inc})
+    return pd.DataFrame(out_rows)
+
+def enforce_pay_fixed(df: pd.DataFrame) -> pd.DataFrame:
+    df = normalize_pay(df)
+    out_rows = []
+    for person, default_pay in PAY_LIST:
+        match = df[df["Person"].str.lower() == person.lower()]
+        pay = float(match["Monthly Pay (GBP)"].iloc[0]) if len(match) else float(default_pay)
+        paid = bool(match["Paid?"].iloc[0]) if len(match) else False
+        out_rows.append({"Person": person, "Monthly Pay (GBP)": pay, "Paid?": paid})
+    return pd.DataFrame(out_rows)
+
+# ------------------------
+# Defaults (fixed rows)
 # ------------------------
 def defaults_assets():
-    return pd.DataFrame(
-        [
-            {"Account": "HSBC", "Currency": "GBP", "Balance (native)": 0.0},
-            {"Account": "Lloyds", "Currency": "GBP", "Balance (native)": 0.0},
-            {"Account": "Apple Savings", "Currency": "USD", "Balance (native)": 0.0},
-        ]
-    )
+    return enforce_assets_fixed(pd.DataFrame(columns=["Account", "Currency", "Balance (native)"]))
 
 def defaults_cards():
-    return pd.DataFrame(
-        [
-            {"Card": "Amex", "Balance (native)": 0.0, "Balance Due (native)": 0.0},
-            {"Card": "Apple Card", "Balance (native)": 0.0, "Balance Due (native)": 0.0},
-        ]
-    )
+    return enforce_cards_fixed(pd.DataFrame(columns=["Card", "Balance (native)", "Balance Due (native)"]))
 
 def defaults_reim():
-    return pd.DataFrame(
-        [
-            {"Source": "Eric Work", "Amount (GBP)": 0.0, "Include?": True},
-            {"Source": "Gigi Work", "Amount (GBP)": 0.0, "Include?": True},
-            {"Source": "Misc", "Amount (GBP)": 0.0, "Include?": False},
-        ]
-    )
+    return enforce_reim_fixed(pd.DataFrame(columns=["Source", "Amount (GBP)", "Include?"]))
 
 def defaults_fixed():
     return pd.DataFrame(
@@ -312,15 +368,10 @@ def defaults_fixed():
     )
 
 def defaults_pay():
-    return pd.DataFrame(
-        [
-            {"Person": "Eric", "Monthly Pay (GBP)": 6100.0, "Paid?": False},
-            {"Person": "Gigi", "Monthly Pay (GBP)": 6000.0, "Paid?": False},
-        ]
-    )
+    return enforce_pay_fixed(pd.DataFrame(columns=["Person", "Monthly Pay (GBP)", "Paid?"]))
 
 # ------------------------
-# State init (always normalized)
+# State init
 # ------------------------
 if "assets" not in st.session_state:
     st.session_state.assets = defaults_assets()
@@ -329,7 +380,7 @@ if "cards" not in st.session_state:
 if "reim" not in st.session_state:
     st.session_state.reim = defaults_reim()
 if "fixed" not in st.session_state:
-    st.session_state.fixed = defaults_fixed()
+    st.session_state.fixed = normalize_fixed(defaults_fixed())
 if "pay" not in st.session_state:
     st.session_state.pay = defaults_pay()
 
@@ -338,21 +389,25 @@ if "fx_override_on" not in st.session_state:
 if "fx_override_rate" not in st.session_state:
     st.session_state.fx_override_rate = 0.80
 
+# Backup UI state
 if "last_backup_created_at" not in st.session_state:
     st.session_state.last_backup_created_at = None
 if "last_restore_at" not in st.session_state:
     st.session_state.last_restore_at = None
 if "last_saved_hash" not in st.session_state:
     st.session_state.last_saved_hash = None
+if "backup_bytes" not in st.session_state:
+    st.session_state.backup_bytes = None
 
-st.session_state.assets = normalize_assets(st.session_state.assets)
-st.session_state.cards = normalize_cards(st.session_state.cards)
-st.session_state.reim = normalize_reim(st.session_state.reim)
+# Normalize + enforce fixed rows (important on load)
+st.session_state.assets = enforce_assets_fixed(st.session_state.assets)
+st.session_state.cards = enforce_cards_fixed(st.session_state.cards)
+st.session_state.reim = enforce_reim_fixed(st.session_state.reim)
 st.session_state.fixed = normalize_fixed(st.session_state.fixed)
-st.session_state.pay = normalize_pay(st.session_state.pay)
+st.session_state.pay = enforce_pay_fixed(st.session_state.pay)
 
 # ------------------------
-# Backup ZIP (consistent contents + hash)
+# ZIP functions (consistent)
 # ------------------------
 def current_state_hash() -> str:
     parts = [
@@ -365,13 +420,9 @@ def current_state_hash() -> str:
         f"fx_override_rate={st.session_state.fx_override_rate}",
         f"schema_version={SCHEMA_VERSION}",
     ]
-    h = hashlib.sha256(("||".join(parts)).encode("utf-8")).hexdigest()
-    return h
+    return hashlib.sha256(("||".join(parts)).encode("utf-8")).hexdigest()
 
-def make_zip() -> bytes:
-    saved_at = utc_now_iso()
-    state_hash = current_state_hash()
-
+def build_zip_bytes(saved_at: str, state_hash: str) -> bytes:
     meta = pd.DataFrame([{
         "schema_version": SCHEMA_VERSION,
         "saved_at_utc": saved_at,
@@ -388,10 +439,6 @@ def make_zip() -> bytes:
         z.writestr("fixed_costs.csv", st.session_state.fixed.to_csv(index=False))
         z.writestr("pay_cycle.csv", st.session_state.pay.to_csv(index=False))
         z.writestr("meta.csv", meta.to_csv(index=False))
-
-    # Track "last saved" inside the app (so we can show status)
-    st.session_state.last_backup_created_at = saved_at
-    st.session_state.last_saved_hash = state_hash
     return mem.getvalue()
 
 def restore_zip(blob: bytes):
@@ -403,32 +450,12 @@ def restore_zip(blob: bytes):
             with z.open(name) as f:
                 return pd.read_csv(f)
 
-        if "assets.csv" in names:
-            st.session_state.assets = normalize_assets(read("assets.csv"))
-        else:
-            st.session_state.assets = defaults_assets()
+        st.session_state.assets = enforce_assets_fixed(read("assets.csv")) if "assets.csv" in names else defaults_assets()
+        st.session_state.cards = enforce_cards_fixed(read("credit_cards.csv")) if "credit_cards.csv" in names else defaults_cards()
+        st.session_state.reim = enforce_reim_fixed(read("reimbursements.csv")) if "reimbursements.csv" in names else defaults_reim()
+        st.session_state.fixed = normalize_fixed(read("fixed_costs.csv")) if "fixed_costs.csv" in names else normalize_fixed(defaults_fixed())
+        st.session_state.pay = enforce_pay_fixed(read("pay_cycle.csv")) if "pay_cycle.csv" in names else defaults_pay()
 
-        if "credit_cards.csv" in names:
-            st.session_state.cards = normalize_cards(read("credit_cards.csv"))
-        else:
-            st.session_state.cards = defaults_cards()
-
-        if "reimbursements.csv" in names:
-            st.session_state.reim = normalize_reim(read("reimbursements.csv"))
-        else:
-            st.session_state.reim = defaults_reim()
-
-        if "fixed_costs.csv" in names:
-            st.session_state.fixed = normalize_fixed(read("fixed_costs.csv"))
-        else:
-            st.session_state.fixed = defaults_fixed()
-
-        if "pay_cycle.csv" in names:
-            st.session_state.pay = normalize_pay(read("pay_cycle.csv"))
-        else:
-            st.session_state.pay = defaults_pay()
-
-        # Restore settings / last saved metadata if present
         if "meta.csv" in names:
             meta = read("meta.csv")
             try:
@@ -442,20 +469,15 @@ def restore_zip(blob: bytes):
     st.session_state.last_restore_at = utc_now_iso()
 
 # ------------------------
-# Sidebar (Save/Load polish + status)
+# Sidebar (Backup polish)
 # ------------------------
 with st.sidebar:
     st.subheader("Backup (ZIP)")
 
-    # Status section
     current_hash = current_state_hash()
-    saved_hash = st.session_state.last_saved_hash
-    dirty = (saved_hash is None) or (current_hash != saved_hash)
+    dirty = (st.session_state.last_saved_hash is None) or (current_hash != st.session_state.last_saved_hash)
 
-    if dirty:
-        badge("Unsaved changes", "warn")
-    else:
-        badge("Saved", "ok")
+    badge("Unsaved changes" if dirty else "Saved", "warn" if dirty else "ok")
 
     if st.session_state.last_backup_created_at:
         st.caption(f"Last backup created: {st.session_state.last_backup_created_at}")
@@ -467,16 +489,24 @@ with st.sidebar:
 
     st.write("")
 
-    # IMPORTANT: we generate zip bytes on-demand so it captures latest data
-    zip_bytes = make_zip()
-    st.download_button(
-        "⬇️ Download backup (ZIP)",
-        data=zip_bytes,
-        file_name="stabler-finances-backup.zip",
-        mime="application/zip",
-        use_container_width=True,
-        help="This ZIP is your single source of truth. Download after you make changes.",
-    )
+    if st.button("Create new backup ZIP", use_container_width=True):
+        saved_at = utc_now_iso()
+        state_hash = current_state_hash()
+        st.session_state.backup_bytes = build_zip_bytes(saved_at=saved_at, state_hash=state_hash)
+        st.session_state.last_backup_created_at = saved_at
+        st.session_state.last_saved_hash = state_hash
+        st.success("Backup prepared — download it below.")
+
+    if st.session_state.backup_bytes is not None:
+        st.download_button(
+            "⬇️ Download backup (ZIP)",
+            data=st.session_state.backup_bytes,
+            file_name="stabler-finances-backup.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
+    else:
+        st.caption("Tap “Create new backup ZIP” first.")
 
     st.write("")
     up = st.file_uploader("⬆️ Restore from backup (ZIP)", type=["zip"])
@@ -490,13 +520,14 @@ with st.sidebar:
         st.session_state.assets = defaults_assets()
         st.session_state.cards = defaults_cards()
         st.session_state.reim = defaults_reim()
-        st.session_state.fixed = defaults_fixed()
+        st.session_state.fixed = normalize_fixed(defaults_fixed())
         st.session_state.pay = defaults_pay()
         st.session_state.fx_override_on = False
         st.session_state.fx_override_rate = 0.80
         st.session_state.last_backup_created_at = None
         st.session_state.last_restore_at = None
         st.session_state.last_saved_hash = None
+        st.session_state.backup_bytes = None
         st.rerun()
 
 # ------------------------
@@ -555,42 +586,52 @@ with k3:
 st.divider()
 
 # ------------------------
-# Row 1
+# Row 1: Assets | Cards | Reimbursements (FORMS)
 # ------------------------
 a, b, c = st.columns([1.2, 1.1, 1.1])
 
 with a:
     st.subheader("Assets")
-    st.session_state.assets = normalize_assets(
-        st.data_editor(
+    with st.form("assets_form", clear_on_submit=False):
+        assets_edit = st.data_editor(
             st.session_state.assets,
-            num_rows="dynamic",
+            num_rows="fixed",  # ✅ no adding rows
             use_container_width=True,
             key="assets_editor",
             column_config={
-                "Account": st.column_config.TextColumn("Account"),
-                "Currency": st.column_config.SelectboxColumn("Currency", options=["GBP", "USD"]),
+                "Account": st.column_config.TextColumn("Account", disabled=True),
+                "Currency": st.column_config.TextColumn("Currency", disabled=True),
                 "Balance (native)": st.column_config.NumberColumn("Balance (native)", format="%.2f"),
             },
         )
-    )
+        assets_apply = st.form_submit_button("Apply Assets Changes", use_container_width=True)
+
+    if assets_apply:
+        st.session_state.assets = enforce_assets_fixed(assets_edit)
+        st.rerun()
+
     totals_line("Total Assets (GBP):", total_assets_gbp)
 
 with b:
     st.subheader("Credit Cards")
-    st.session_state.cards = normalize_cards(
-        st.data_editor(
+    with st.form("cards_form", clear_on_submit=False):
+        cards_edit = st.data_editor(
             st.session_state.cards,
-            num_rows="dynamic",
+            num_rows="fixed",  # ✅ no adding rows
             use_container_width=True,
             key="cards_editor",
             column_config={
-                "Card": st.column_config.TextColumn("Card"),
+                "Card": st.column_config.TextColumn("Card", disabled=True),
                 "Balance (native)": st.column_config.NumberColumn("Balance", format="%.2f"),
                 "Balance Due (native)": st.column_config.NumberColumn("Balance Due", format="%.2f"),
             },
         )
-    )
+        cards_apply = st.form_submit_button("Apply Credit Card Changes", use_container_width=True)
+
+    if cards_apply:
+        st.session_state.cards = enforce_cards_fixed(cards_edit)
+        st.rerun()
+
     st.markdown(
         f"""
 <div class="totals">
@@ -604,34 +645,39 @@ with b:
 
 with c:
     st.subheader("Reimbursement Pending")
-    st.session_state.reim = normalize_reim(
-        st.data_editor(
+    with st.form("reim_form", clear_on_submit=False):
+        reim_edit = st.data_editor(
             st.session_state.reim,
-            num_rows="dynamic",
+            num_rows="fixed",  # ✅ no adding rows
             use_container_width=True,
             key="reim_editor",
             column_config={
-                "Source": st.column_config.TextColumn("Source"),
+                "Source": st.column_config.TextColumn("Source", disabled=True),
                 "Amount (GBP)": st.column_config.NumberColumn("Amount (GBP)", format="%.2f"),
                 "Include?": st.column_config.CheckboxColumn("Include?"),
             },
         )
-    )
+        reim_apply = st.form_submit_button("Apply Reimbursement Changes", use_container_width=True)
+
+    if reim_apply:
+        st.session_state.reim = enforce_reim_fixed(reim_edit)
+        st.rerun()
+
     totals_line("Included Reimbursements (GBP):", included_reim_gbp)
 
 st.divider()
 
 # ------------------------
-# Row 2
+# Row 2: Monthly Fixed | Monthly Pay (Pay stays fixed too)
 # ------------------------
 d, e = st.columns([2.1, 1.0])
 
 with d:
     st.subheader("Monthly Fixed")
-    st.session_state.fixed = normalize_fixed(
-        st.data_editor(
+    with st.form("fixed_form", clear_on_submit=False):
+        fixed_edit = st.data_editor(
             st.session_state.fixed,
-            num_rows="dynamic",
+            num_rows="dynamic",  # keep dynamic here (you didn't ask to lock this)
             use_container_width=True,
             key="fixed_editor",
             column_config={
@@ -640,7 +686,12 @@ with d:
                 "Due?": st.column_config.CheckboxColumn("Due?"),
             },
         )
-    )
+        fixed_apply = st.form_submit_button("Apply Monthly Fixed Changes", use_container_width=True)
+
+    if fixed_apply:
+        st.session_state.fixed = normalize_fixed(fixed_edit)
+        st.rerun()
+
     st.markdown(
         f"""
 <div class="totals">
@@ -654,20 +705,25 @@ with d:
 
 with e:
     st.subheader("Monthly Pay")
-    st.caption("Tick Paid? when salary has landed (only ticked rows count in the projection).")
-    st.session_state.pay = normalize_pay(
-        st.data_editor(
+    st.caption("Tick Paid? when salary has landed (only ticked rows count in projection).")
+    with st.form("pay_form", clear_on_submit=False):
+        pay_edit = st.data_editor(
             st.session_state.pay,
-            num_rows="dynamic",
+            num_rows="fixed",
             use_container_width=True,
             key="pay_editor",
             column_config={
-                "Person": st.column_config.TextColumn("Person"),
+                "Person": st.column_config.TextColumn("Person", disabled=True),
                 "Monthly Pay (GBP)": st.column_config.NumberColumn("Monthly Pay", format="%.2f"),
                 "Paid?": st.column_config.CheckboxColumn("Paid?"),
             },
         )
-    )
+        pay_apply = st.form_submit_button("Apply Pay Changes", use_container_width=True)
+
+    if pay_apply:
+        st.session_state.pay = enforce_pay_fixed(pay_edit)
+        st.rerun()
+
     totals_line("Total Pay Counted (Paid only):", paid_pay_gbp)
 
 st.divider()
