@@ -9,7 +9,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 
-SCHEMA_VERSION = "2026-02-21-stabler-finances-stable-v6-pay-flip"
+SCHEMA_VERSION = "2026-02-21-stabler-finances-stable-v6-fx-refresh-button"
 
 GBP = "GBP"
 USD = "USD"
@@ -131,11 +131,7 @@ def fmt_money(amount: float, currency: str) -> str:
 
 @st.cache_data(ttl=60 * 60)  # 1 hour
 def fetch_usd_to_gbp() -> float:
-    r = requests.get(
-        "https://api.frankfurter.dev/v1/latest",
-        params={"base": "USD", "symbols": "GBP"},
-        timeout=8,
-    )
+    r = requests.get("https://api.exchangerate.host/latest", params={"base": "USD", "symbols": "GBP"}, timeout=8)
     r.raise_for_status()
     return float(r.json()["rates"]["GBP"])
 
@@ -230,7 +226,7 @@ def defaults_fixed():
     )
 
 def defaults_pay():
-    # Start unticked (False) -> INCLUDED in forward projection by default
+    # Paid? checkbox is used as "exclude from projection" (ticked => excluded)
     return pd.DataFrame([{"Person": p, "Monthly Pay": amt, "Paid?": False} for p, amt in PAY_ROWS])
 
 def defaults_rac_bills():
@@ -484,14 +480,14 @@ cards_due_total_gbp = float(sum(to_gbp(parse_money(r["Balance Due"]), r["Currenc
 reim_included_gbp = float(reim_df.loc[reim_df["Include?"] == True, "Amount"].apply(parse_money).sum())  # noqa: E712
 fixed_due_gbp = float(fixed_df.loc[fixed_df["Due?"] == True, "Amount"].sum())  # noqa: E712
 
-# ✅ FLIPPED PAY LOGIC:
-# Paid? = True  -> EXCLUDE from forward projection
-# Paid? = False -> INCLUDE in forward projection
-pay_paid_gbp = float(pay_df.loc[pay_df["Paid?"] == False, "Monthly Pay"].apply(parse_money).sum())  # noqa: E712
+# FLIPPED LOGIC:
+# Unticked (Paid? == False) salaries are INCLUDED in projection.
+# Ticked (Paid? == True) are EXCLUDED from projection.
+pay_included_gbp = float(pay_df.loc[pay_df["Paid?"] == False, "Monthly Pay"].apply(parse_money).sum())  # noqa: E712
 
 # RAC is a bill/liability -> subtract it (current month only)
 net_cash_gbp = assets_total_gbp + reim_included_gbp - cards_balance_total_gbp - rac_due_this_month_gbp
-remaining_spending_gbp = net_cash_gbp + (pay_paid_gbp - fixed_due_gbp)
+remaining_spending_gbp = net_cash_gbp + (pay_included_gbp - fixed_due_gbp)
 
 ability_to_repay = assets_total_gbp >= cards_due_total_gbp
 
@@ -671,7 +667,7 @@ with e:
 
     edited_rac = st.data_editor(
         rac_edit[["Purchase", "Amount", "Month"]],
-        hide_index=True,   # ✅ removes the 0,1,2 number column
+        hide_index=True,
         num_rows="dynamic",
         use_container_width=True,
         column_config={
@@ -723,37 +719,35 @@ with e:
         st.session_state.app_state["pay_cycle"] = enforce_pay(new_pay)
         st.rerun()
 
-    totals_line("Total Pay Included (Unticked):", pay_paid_gbp)
+    totals_line("Total Pay Included (Unticked):", pay_included_gbp)
 
 st.divider()
 
 # ------------------------
-# FX bottom
+# FX bottom (with refresh button)
 # ------------------------
 st.subheader("FX (USD → GBP)")
 st.caption("Used only for converting USD balances (Apple Savings / Apple Card) into GBP totals.")
 
-with fxr:
-    use_live = st.toggle(
-        "Use live FX",
-        value=bool(fx_cfg.get("use_live", True))
+fxl, fxr = st.columns([1.2, 1.0])
+
+with fxl:
+    st.markdown(
+        f"""<div class="totals">Live USD→GBP (cached): <span class="neu">{usd_to_gbp_live:.4f}</span></div>""",
+        unsafe_allow_html=True,
     )
 
-    manual = st.number_input(
-        "Manual USD→GBP",
-        value=float(fx_cfg.get("manual_usd_gbp", 0.80)),
-        step=0.0001,
-        format="%.4f",
-    )
-
-    if st.button("Pull current rate", use_container_width=True):
-        fetch_usd_to_gbp.clear()   # clears cached FX rate
-        st.success("Live FX rate refreshed.")
+    if st.button("🔄 Pull current rate", use_container_width=True):
+        try:
+            fetch_usd_to_gbp.clear()
+        except Exception:
+            pass
         st.rerun()
 
+with fxr:
+    use_live = st.toggle("Use live FX", value=bool(fx_cfg.get("use_live", True)))
+    manual = st.number_input("Manual USD→GBP", value=float(fx_cfg.get("manual_usd_gbp", 0.80)), step=0.0001, format="%.4f")
+
     if st.button("Apply FX Settings", use_container_width=True):
-        st.session_state.app_state["fx"] = {
-            "use_live": bool(use_live),
-            "manual_usd_gbp": float(manual),
-        }
+        st.session_state.app_state["fx"] = {"use_live": bool(use_live), "manual_usd_gbp": float(manual)}
         st.rerun()
