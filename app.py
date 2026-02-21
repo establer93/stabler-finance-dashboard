@@ -9,7 +9,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 
-SCHEMA_VERSION = "2026-02-21-stabler-finances-stable-v3-rac-default-month-restore-button"
+SCHEMA_VERSION = "2026-02-21-stabler-finances-stable-v5-rac-month-dropdown-liability"
 
 GBP = "GBP"
 USD = "USD"
@@ -59,8 +59,22 @@ def utc_now_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 def current_month_yyyy_mm() -> str:
-    # uses server time; fine for your use case
     return datetime.now().strftime("%Y-%m")
+
+def month_options_yyyy_mm() -> list[str]:
+    """
+    Dropdown options: a rolling window of months (current year ± 2 years).
+    Format: YYYY-MM
+    Includes "" as first option to allow blank.
+    """
+    now = datetime.now()
+    start_year = now.year - 2
+    end_year = now.year + 2
+    opts = [""]
+    for y in range(start_year, end_year + 1):
+        for m in range(1, 13):
+            opts.append(f"{y:04d}-{m:02d}")
+    return opts
 
 def cls(x: float) -> str:
     x = float(x)
@@ -311,7 +325,7 @@ def normalize_rac_bills(df: pd.DataFrame) -> pd.DataFrame:
 
     df["Purchase"] = df["Purchase"].astype(str).str.strip()
     df["Amount"] = df["Amount"].apply(parse_money)
-    df["Month"] = df["Month"].astype(str).str.strip()
+    df["Month"] = df["Month"].fillna("").astype(str).str.strip()
     return df[["Purchase", "Amount", "Month"]]
 
 # ------------------------
@@ -348,7 +362,6 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
             fixed = pd.read_csv(z.open("fixed_costs.csv"))
             pay = pd.read_csv(z.open("pay_cycle.csv"))
 
-            # RAC is optional for backwards compatibility
             if "rac_bills.csv" in names:
                 rac = pd.read_csv(z.open("rac_bills.csv"))
             else:
@@ -383,7 +396,6 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
 if "app_state" not in st.session_state:
     st.session_state.app_state = default_state()
 
-# Sidebar pending upload bytes
 if "pending_zip_bytes" not in st.session_state:
     st.session_state.pending_zip_bytes = None
 
@@ -406,11 +418,12 @@ with st.sidebar:
 
     up = st.file_uploader("Restore from backup (ZIP)", type=["zip"])
     if up is not None:
-        # store uploaded bytes, but don't apply yet
         st.session_state.pending_zip_bytes = up.read()
-        badge("ZIP ready to restore — tap Update sheet", "warn")
 
-    # NEW BUTTON: apply restore only when pressed
+    if st.session_state.pending_zip_bytes is not None:
+        badge("Pending ZIP loaded (not applied)", "warn")
+        st.caption("Tap “Update sheet from uploaded ZIP” to apply it.")
+
     if st.button("Update sheet from uploaded ZIP", use_container_width=True):
         if st.session_state.pending_zip_bytes is None:
             st.warning("Upload a ZIP first.")
@@ -450,7 +463,14 @@ pay_df = state["pay_cycle"].copy()
 rac_df = normalize_rac_bills(state.get("rac_bills", defaults_rac_bills()).copy())
 
 # ------------------------
-# Calculations (unchanged)
+# RAC (current month liability)
+# ------------------------
+THIS_MONTH = current_month_yyyy_mm()
+rac_df["Month"] = rac_df["Month"].fillna("").astype(str).str.strip()
+rac_due_this_month_gbp = float(rac_df.loc[rac_df["Month"] == THIS_MONTH, "Amount"].apply(parse_money).sum())
+
+# ------------------------
+# Calculations
 # ------------------------
 assets_total_gbp = float(sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in assets_df.iterrows()))
 cards_balance_total_gbp = float(sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows()))
@@ -460,7 +480,8 @@ reim_included_gbp = float(reim_df.loc[reim_df["Include?"] == True, "Amount"].app
 fixed_due_gbp = float(fixed_df.loc[fixed_df["Due?"] == True, "Amount"].sum())  # noqa: E712
 pay_paid_gbp = float(pay_df.loc[pay_df["Paid?"] == True, "Monthly Pay"].apply(parse_money).sum())  # noqa: E712
 
-net_cash_gbp = assets_total_gbp + reim_included_gbp - cards_balance_total_gbp
+# RAC is a bill/liability -> subtract it (current month only)
+net_cash_gbp = assets_total_gbp + reim_included_gbp - cards_balance_total_gbp - rac_due_this_month_gbp
 remaining_spending_gbp = net_cash_gbp + (pay_paid_gbp - fixed_due_gbp)
 
 ability_to_repay = assets_total_gbp >= cards_due_total_gbp
@@ -635,9 +656,9 @@ with d:
 
 with e:
     st.subheader("RAC monthly bill")
-    st.caption("GBP only. Add line items. If Month is blank, it will default to the current month on Apply.")
 
     rac_edit = rac_df.copy()
+    # ensure GBP symbol display in cells
     rac_edit["Amount"] = rac_edit["Amount"].apply(lambda v: fmt_money(parse_money(v), GBP))
 
     edited_rac = st.data_editor(
@@ -648,7 +669,7 @@ with e:
         column_config={
             "Purchase": st.column_config.TextColumn("Purchase"),
             "Amount": st.column_config.TextColumn("Amount"),
-            "Month": st.column_config.TextColumn("Month", help="e.g. 2026-02 or Feb 2026"),
+            "Month": st.column_config.SelectboxColumn("Month", options=month_options_yyyy_mm()),
         },
         key="rac_editor",
     )
@@ -657,13 +678,14 @@ with e:
         new_rac = edited_rac.copy()
         new_rac["Amount"] = new_rac["Amount"].apply(parse_money)
 
-        # ✅ Default Month for blank rows
         default_m = current_month_yyyy_mm()
         new_rac["Month"] = new_rac["Month"].fillna("").astype(str).str.strip()
         new_rac.loc[new_rac["Month"] == "", "Month"] = default_m
 
         st.session_state.app_state["rac_bills"] = normalize_rac_bills(new_rac)
         st.rerun()
+
+    totals_line(f"RAC due this month ({THIS_MONTH}):", rac_due_this_month_gbp)
 
     st.write("")
 
