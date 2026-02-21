@@ -860,7 +860,7 @@ with fxr:
 # ------------------------
 # Main Apply button (top-right) + timestamp under it
 # ------------------------
-apply_clicked = apply_placeholder.button("✅ Apply all changes", type="primary", use_container_width=True)
+apply_clicked = apply_placeholder.button("✅ Apply all changes", use_container_width=True)
 
 if st.session_state.last_apply_local:
     apply_ts_placeholder.caption(f"Last applied: {st.session_state.last_apply_local}")
