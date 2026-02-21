@@ -9,7 +9,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 
-SCHEMA_VERSION = "2026-02-21-zip-polish-v3-forms-fixedrows"
+SCHEMA_VERSION = "2026-02-21-zip-polish-v5-reqs-1-5"
 
 # ------------------------
 # Styling (colours)
@@ -68,6 +68,11 @@ def _to_float(s: pd.Series) -> pd.Series:
 
 def gbp(x: float) -> str:
     return f"£{float(x):,.2f}"
+
+def money_native(amount: float, currency: str) -> str:
+    cur = (currency or "GBP").upper()
+    sym = "$" if cur == "USD" else "£"
+    return f"{sym}{float(amount):,.2f}"
 
 def cls(x: float) -> str:
     x = float(x)
@@ -195,7 +200,6 @@ def normalize_cards(df: pd.DataFrame) -> pd.DataFrame:
     df["Balance (native)"] = _to_float(df["Balance (native)"])
     df["Balance Due (native)"] = _to_float(df["Balance Due (native)"])
 
-    # Only keep the 3 fields you want
     return df[["Card", "Balance (native)", "Balance Due (native)"]]
 
 def normalize_reim(df: pd.DataFrame) -> pd.DataFrame:
@@ -250,7 +254,6 @@ def normalize_pay(df: pd.DataFrame) -> pd.DataFrame:
 
     if "Person" not in df.columns:
         df["Person"] = ""
-
     if "Monthly Pay (GBP)" not in df.columns:
         df["Monthly Pay (GBP)"] = 0.0
 
@@ -296,12 +299,10 @@ PAY_LIST = [
 
 def enforce_assets_fixed(df: pd.DataFrame) -> pd.DataFrame:
     df = normalize_assets(df)
-    # build lookup by Account
     out_rows = []
     for acct, cur in ASSET_ACCOUNTS:
         match = df[df["Account"].str.lower() == acct.lower()]
         bal = float(match["Balance (native)"].iloc[0]) if len(match) else 0.0
-        # Keep currency from config (forces consistency)
         out_rows.append({"Account": acct, "Currency": cur, "Balance (native)": bal})
     return pd.DataFrame(out_rows)
 
@@ -399,7 +400,7 @@ if "last_saved_hash" not in st.session_state:
 if "backup_bytes" not in st.session_state:
     st.session_state.backup_bytes = None
 
-# Normalize + enforce fixed rows (important on load)
+# Normalize + enforce fixed rows on load
 st.session_state.assets = enforce_assets_fixed(st.session_state.assets)
 st.session_state.cards = enforce_cards_fixed(st.session_state.cards)
 st.session_state.reim = enforce_reim_fixed(st.session_state.reim)
@@ -476,7 +477,6 @@ with st.sidebar:
 
     current_hash = current_state_hash()
     dirty = (st.session_state.last_saved_hash is None) or (current_hash != st.session_state.last_saved_hash)
-
     badge("Unsaved changes" if dirty else "Saved", "warn" if dirty else "ok")
 
     if st.session_state.last_backup_created_at:
@@ -570,7 +570,12 @@ pay_df = st.session_state.pay.copy()
 paid_pay_gbp = float(pay_df.loc[pay_df["Paid?"] == True, "Monthly Pay (GBP)"].sum())  # noqa: E712
 
 net_cash_gbp = total_assets_gbp - total_card_bal_gbp + included_reim_gbp
-projected_available_gbp = net_cash_gbp + (paid_pay_gbp - fixed_total_gbp)
+
+# KPI 3 renamed
+remaining_spending_gbp = net_cash_gbp + (paid_pay_gbp - fixed_total_gbp)
+
+# Ability to repay (yes/no)
+can_repay = total_assets_gbp >= total_card_due_gbp
 
 # ------------------------
 # KPIs
@@ -579,9 +584,13 @@ k1, k2, k3 = st.columns(3)
 with k1:
     kpi("Net Cash (GBP)", net_cash_gbp)
 with k2:
-    kpi("Total Credit Card Bill Due (GBP)", total_card_due_gbp, force_neutral=True)
+    # Show Total Credit Card Bill Due + Ability to repay
+    st.markdown("<div class='kpi'><div class='label'>Total Credit Card Bill Due (GBP)</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='value neu'>{gbp(total_card_due_gbp)}</div>", unsafe_allow_html=True)
+    badge(f"Ability to repay: {'Yes' if can_repay else 'No'}", "ok" if can_repay else "warn")
+    st.markdown("</div>", unsafe_allow_html=True)
 with k3:
-    kpi("Projected Available This Month (GBP)", projected_available_gbp)
+    kpi("Remaining spending this month (GBP)", remaining_spending_gbp)
 
 st.divider()
 
@@ -595,13 +604,14 @@ with a:
     with st.form("assets_form", clear_on_submit=False):
         assets_edit = st.data_editor(
             st.session_state.assets,
-            num_rows="fixed",  # ✅ no adding rows
+            num_rows="fixed",
             use_container_width=True,
+            hide_index=True,  # ✅ remove 0/1/2 column
             key="assets_editor",
             column_config={
                 "Account": st.column_config.TextColumn("Account", disabled=True),
                 "Currency": st.column_config.TextColumn("Currency", disabled=True),
-                "Balance (native)": st.column_config.NumberColumn("Balance (native)", format="%.2f"),
+                "Balance (native)": st.column_config.NumberColumn("Balance (native)", format="%,.2f"),
             },
         )
         assets_apply = st.form_submit_button("Apply Assets Changes", use_container_width=True)
@@ -610,6 +620,14 @@ with a:
         st.session_state.assets = enforce_assets_fixed(assets_edit)
         st.rerun()
 
+    # Native currency view (shows £/$ per row)
+    assets_native = st.session_state.assets.copy()
+    assets_native["Balance (native)"] = [
+        money_native(v, c) for v, c in zip(assets_native["Balance (native)"], assets_native["Currency"])
+    ]
+    st.caption("Native currency view")
+    st.dataframe(assets_native, use_container_width=True, hide_index=True)
+
     totals_line("Total Assets (GBP):", total_assets_gbp)
 
 with b:
@@ -617,13 +635,14 @@ with b:
     with st.form("cards_form", clear_on_submit=False):
         cards_edit = st.data_editor(
             st.session_state.cards,
-            num_rows="fixed",  # ✅ no adding rows
+            num_rows="fixed",
             use_container_width=True,
+            hide_index=True,  # ✅ remove 0/1/2 column
             key="cards_editor",
             column_config={
                 "Card": st.column_config.TextColumn("Card", disabled=True),
-                "Balance (native)": st.column_config.NumberColumn("Balance", format="%.2f"),
-                "Balance Due (native)": st.column_config.NumberColumn("Balance Due", format="%.2f"),
+                "Balance (native)": st.column_config.NumberColumn("Balance", format="%,.2f"),
+                "Balance Due (native)": st.column_config.NumberColumn("Balance Due", format="%,.2f"),
             },
         )
         cards_apply = st.form_submit_button("Apply Credit Card Changes", use_container_width=True)
@@ -631,6 +650,19 @@ with b:
     if cards_apply:
         st.session_state.cards = enforce_cards_fixed(cards_edit)
         st.rerun()
+
+    # Native currency view for cards (Apple Card shows USD)
+    cards_native = st.session_state.cards.copy()
+    cards_native["Currency"] = cards_native["Card"].apply(lambda x: "USD" if is_usd_item(str(x)) else "GBP")
+    cards_native["Balance (native)"] = [
+        money_native(v, c) for v, c in zip(cards_native["Balance (native)"], cards_native["Currency"])
+    ]
+    cards_native["Balance Due (native)"] = [
+        money_native(v, c) for v, c in zip(cards_native["Balance Due (native)"], cards_native["Currency"])
+    ]
+    cards_native = cards_native.drop(columns=["Currency"])
+    st.caption("Native currency view")
+    st.dataframe(cards_native, use_container_width=True, hide_index=True)
 
     st.markdown(
         f"""
@@ -648,12 +680,13 @@ with c:
     with st.form("reim_form", clear_on_submit=False):
         reim_edit = st.data_editor(
             st.session_state.reim,
-            num_rows="fixed",  # ✅ no adding rows
+            num_rows="fixed",
             use_container_width=True,
+            hide_index=True,  # ✅ remove 0/1/2 column
             key="reim_editor",
             column_config={
                 "Source": st.column_config.TextColumn("Source", disabled=True),
-                "Amount (GBP)": st.column_config.NumberColumn("Amount (GBP)", format="%.2f"),
+                "Amount (GBP)": st.column_config.NumberColumn("Amount (GBP)", format="%,.2f"),
                 "Include?": st.column_config.CheckboxColumn("Include?"),
             },
         )
@@ -668,7 +701,7 @@ with c:
 st.divider()
 
 # ------------------------
-# Row 2: Monthly Fixed | Monthly Pay (Pay stays fixed too)
+# Row 2: Monthly Fixed | Monthly Pay
 # ------------------------
 d, e = st.columns([2.1, 1.0])
 
@@ -677,12 +710,13 @@ with d:
     with st.form("fixed_form", clear_on_submit=False):
         fixed_edit = st.data_editor(
             st.session_state.fixed,
-            num_rows="dynamic",  # keep dynamic here (you didn't ask to lock this)
+            num_rows="dynamic",
             use_container_width=True,
+            hide_index=True,
             key="fixed_editor",
             column_config={
                 "Item": st.column_config.TextColumn("Item"),
-                "Amount (GBP)": st.column_config.NumberColumn("Amount (GBP)", format="%.2f"),
+                "Amount (GBP)": st.column_config.NumberColumn("Amount (GBP)", format="%,.2f"),
                 "Due?": st.column_config.CheckboxColumn("Due?"),
             },
         )
@@ -711,10 +745,11 @@ with e:
             st.session_state.pay,
             num_rows="fixed",
             use_container_width=True,
+            hide_index=True,
             key="pay_editor",
             column_config={
                 "Person": st.column_config.TextColumn("Person", disabled=True),
-                "Monthly Pay (GBP)": st.column_config.NumberColumn("Monthly Pay", format="%.2f"),
+                "Monthly Pay (GBP)": st.column_config.NumberColumn("Monthly Pay", format="%,.2f"),
                 "Paid?": st.column_config.CheckboxColumn("Paid?"),
             },
         )
