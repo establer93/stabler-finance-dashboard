@@ -733,18 +733,27 @@ st.divider()
 st.subheader("FX (USD → GBP)")
 st.caption("Used only for converting USD balances (Apple Savings / Apple Card) into GBP totals.")
 
-fxl, fxr = st.columns([1.2, 1.0])
-
-with fxl:
-    st.markdown(
-        f"""<div class="totals">Live USD→GBP (cached): <span class="neu">{usd_to_gbp_live:.4f}</span></div>""",
-        unsafe_allow_html=True,
+with fxr:
+    use_live = st.toggle(
+        "Use live FX",
+        value=bool(fx_cfg.get("use_live", True))
     )
 
-with fxr:
-    use_live = st.toggle("Use live FX", value=bool(fx_cfg.get("use_live", True)))
-    manual = st.number_input("Manual USD→GBP", value=float(fx_cfg.get("manual_usd_gbp", 0.80)), step=0.0001, format="%.4f")
+    manual = st.number_input(
+        "Manual USD→GBP",
+        value=float(fx_cfg.get("manual_usd_gbp", 0.80)),
+        step=0.0001,
+        format="%.4f",
+    )
+
+    if st.button("Pull current rate", use_container_width=True):
+        fetch_usd_to_gbp.clear()   # clears cached FX rate
+        st.success("Live FX rate refreshed.")
+        st.rerun()
 
     if st.button("Apply FX Settings", use_container_width=True):
-        st.session_state.app_state["fx"] = {"use_live": bool(use_live), "manual_usd_gbp": float(manual)}
+        st.session_state.app_state["fx"] = {
+            "use_live": bool(use_live),
+            "manual_usd_gbp": float(manual),
+        }
         st.rerun()
