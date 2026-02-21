@@ -1,12 +1,15 @@
 import io
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
+import hashlib
 
 import pandas as pd
 import requests
 import streamlit as st
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
+
+SCHEMA_VERSION = "2026-02-21-zip-polish-v1"  # bump this if we ever change file structure
 
 # ------------------------
 # Styling (colours)
@@ -26,6 +29,14 @@ st.markdown(
 .totals .neg { color: #FF4B4B; font-weight: 650; }
 .totals .neu { color: rgba(255,255,255,0.90); font-weight: 650; }
 
+.badge {
+  display:inline-block; padding:2px 8px; border-radius:12px;
+  font-size:12px; opacity:0.9; border:1px solid rgba(255,255,255,0.15);
+}
+.badge-ok { background: rgba(46, 204, 113, 0.15); }
+.badge-warn { background: rgba(255, 75, 75, 0.15); }
+.badge-neutral { background: rgba(255,255,255,0.08); }
+
 div[data-testid="stSidebar"] .stButton button,
 div[data-testid="stSidebar"] .stDownloadButton button {
     width: 100%;
@@ -40,6 +51,9 @@ st.title("Stabler Family Finances")
 # ------------------------
 # Helpers
 # ------------------------
+def utc_now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
 def _to_float(s: pd.Series) -> pd.Series:
     s = s.astype(str)
     s = (
@@ -81,6 +95,10 @@ def totals_line(label: str, value: float):
         unsafe_allow_html=True,
     )
 
+def badge(text: str, kind: str = "neutral"):
+    klass = {"ok": "badge-ok", "warn": "badge-warn", "neutral": "badge-neutral"}.get(kind, "badge-neutral")
+    st.markdown(f"<span class='badge {klass}'>{text}</span>", unsafe_allow_html=True)
+
 def is_usd_item(name: str) -> bool:
     if not isinstance(name, str):
         return False
@@ -117,8 +135,10 @@ def _coerce_bool_col(s: pd.Series, default=False) -> pd.Series:
 # ------------------------
 def normalize_assets(df: pd.DataFrame) -> pd.DataFrame:
     df = _clean_cols(df)
-    if "Account" not in df.columns: df["Account"] = ""
-    if "Currency" not in df.columns: df["Currency"] = "GBP"
+    if "Account" not in df.columns:
+        df["Account"] = ""
+    if "Currency" not in df.columns:
+        df["Currency"] = "GBP"
     if "Balance (native)" not in df.columns:
         for a in ["Balance", "balance", "Amount", "amount", "Value", "value"]:
             if a in df.columns:
@@ -126,14 +146,20 @@ def normalize_assets(df: pd.DataFrame) -> pd.DataFrame:
                 break
         if "Balance (native)" not in df.columns:
             df["Balance (native)"] = 0.0
+
+    df["Account"] = df["Account"].astype(str).str.strip()
     df["Currency"] = df["Currency"].astype(str).str.strip().str.upper()
     df["Balance (native)"] = _to_float(df["Balance (native)"])
+
+    # Always remove "Cash" row if it exists
+    df = df[df["Account"].str.lower() != "cash"].copy()
+
     return df[["Account", "Currency", "Balance (native)"]]
 
 def normalize_cards(df: pd.DataFrame) -> pd.DataFrame:
     df = _clean_cols(df)
-
     rename_map = {}
+
     if "Card" not in df.columns:
         for a in ["card", "Name", "name"]:
             if a in df.columns:
@@ -172,7 +198,8 @@ def normalize_cards(df: pd.DataFrame) -> pd.DataFrame:
 
 def normalize_reim(df: pd.DataFrame) -> pd.DataFrame:
     df = _clean_cols(df)
-    if "Source" not in df.columns: df["Source"] = ""
+    if "Source" not in df.columns:
+        df["Source"] = ""
     if "Amount (GBP)" not in df.columns:
         for a in ["Amount", "amount", "Value", "value"]:
             if a in df.columns:
@@ -182,13 +209,15 @@ def normalize_reim(df: pd.DataFrame) -> pd.DataFrame:
             df["Amount (GBP)"] = 0.0
     if "Include?" not in df.columns:
         df["Include?"] = False
+
     df["Amount (GBP)"] = _to_float(df["Amount (GBP)"])
     df["Include?"] = _coerce_bool_col(df["Include?"], default=False)
     return df[["Source", "Amount (GBP)", "Include?"]]
 
 def normalize_fixed(df: pd.DataFrame) -> pd.DataFrame:
     df = _clean_cols(df)
-    if "Item" not in df.columns: df["Item"] = ""
+    if "Item" not in df.columns:
+        df["Item"] = ""
     if "Amount (GBP)" not in df.columns:
         for a in ["Amount", "amount", "Value", "value"]:
             if a in df.columns:
@@ -198,21 +227,14 @@ def normalize_fixed(df: pd.DataFrame) -> pd.DataFrame:
             df["Amount (GBP)"] = 0.0
     if "Due?" not in df.columns:
         df["Due?"] = True
+
     df["Amount (GBP)"] = _to_float(df["Amount (GBP)"])
     df["Due?"] = _coerce_bool_col(df["Due?"], default=True)
     return df[["Item", "Amount (GBP)", "Due?"]]
 
 def normalize_pay(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    New schema:
-      Person | Monthly Pay (GBP) | Paid?
-    Backward compatible:
-      - If old column Monthly pay (£) exists, rename
-      - If Paid? missing, default False
-    """
     df = _clean_cols(df)
 
-    # rename old monthly pay col -> new
     if "Monthly Pay (GBP)" not in df.columns:
         if "Monthly pay (£)" in df.columns:
             df = df.rename(columns={"Monthly pay (£)": "Monthly Pay (GBP)"})
@@ -224,12 +246,10 @@ def normalize_pay(df: pd.DataFrame) -> pd.DataFrame:
 
     if "Person" not in df.columns:
         df["Person"] = ""
-
     if "Monthly Pay (GBP)" not in df.columns:
         df["Monthly Pay (GBP)"] = 0.0
 
     if "Paid?" not in df.columns:
-        # old schemas sometimes had 'Paid' / 'paid'
         if "Paid" in df.columns:
             df = df.rename(columns={"Paid": "Paid?"})
         elif "paid" in df.columns:
@@ -251,7 +271,6 @@ def defaults_assets():
             {"Account": "HSBC", "Currency": "GBP", "Balance (native)": 0.0},
             {"Account": "Lloyds", "Currency": "GBP", "Balance (native)": 0.0},
             {"Account": "Apple Savings", "Currency": "USD", "Balance (native)": 0.0},
-            {"Account": "Cash", "Currency": "GBP", "Balance (native)": 0.0},
         ]
     )
 
@@ -293,7 +312,6 @@ def defaults_fixed():
     )
 
 def defaults_pay():
-    # Requested defaults: Eric 6100, Gigi 6000
     return pd.DataFrame(
         [
             {"Person": "Eric", "Monthly Pay (GBP)": 6100.0, "Paid?": False},
@@ -314,10 +332,18 @@ if "fixed" not in st.session_state:
     st.session_state.fixed = defaults_fixed()
 if "pay" not in st.session_state:
     st.session_state.pay = defaults_pay()
+
 if "fx_override_on" not in st.session_state:
     st.session_state.fx_override_on = False
 if "fx_override_rate" not in st.session_state:
     st.session_state.fx_override_rate = 0.80
+
+if "last_backup_created_at" not in st.session_state:
+    st.session_state.last_backup_created_at = None
+if "last_restore_at" not in st.session_state:
+    st.session_state.last_restore_at = None
+if "last_saved_hash" not in st.session_state:
+    st.session_state.last_saved_hash = None
 
 st.session_state.assets = normalize_assets(st.session_state.assets)
 st.session_state.cards = normalize_cards(st.session_state.cards)
@@ -326,9 +352,34 @@ st.session_state.fixed = normalize_fixed(st.session_state.fixed)
 st.session_state.pay = normalize_pay(st.session_state.pay)
 
 # ------------------------
-# Backup ZIP
+# Backup ZIP (consistent contents + hash)
 # ------------------------
+def current_state_hash() -> str:
+    parts = [
+        st.session_state.assets.to_csv(index=False),
+        st.session_state.cards.to_csv(index=False),
+        st.session_state.reim.to_csv(index=False),
+        st.session_state.fixed.to_csv(index=False),
+        st.session_state.pay.to_csv(index=False),
+        f"fx_override_on={st.session_state.fx_override_on}",
+        f"fx_override_rate={st.session_state.fx_override_rate}",
+        f"schema_version={SCHEMA_VERSION}",
+    ]
+    h = hashlib.sha256(("||".join(parts)).encode("utf-8")).hexdigest()
+    return h
+
 def make_zip() -> bytes:
+    saved_at = utc_now_iso()
+    state_hash = current_state_hash()
+
+    meta = pd.DataFrame([{
+        "schema_version": SCHEMA_VERSION,
+        "saved_at_utc": saved_at,
+        "fx_override_on": bool(st.session_state.fx_override_on),
+        "fx_override_rate": float(st.session_state.fx_override_rate),
+        "state_hash": state_hash,
+    }])
+
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("assets.csv", st.session_state.assets.to_csv(index=False))
@@ -336,52 +387,105 @@ def make_zip() -> bytes:
         z.writestr("reimbursements.csv", st.session_state.reim.to_csv(index=False))
         z.writestr("fixed_costs.csv", st.session_state.fixed.to_csv(index=False))
         z.writestr("pay_cycle.csv", st.session_state.pay.to_csv(index=False))
-        meta = pd.DataFrame([{
-            "saved_at": datetime.utcnow().isoformat() + "Z",
-            "fx_override_on": st.session_state.fx_override_on,
-            "fx_override_rate": st.session_state.fx_override_rate,
-        }])
         z.writestr("meta.csv", meta.to_csv(index=False))
+
+    # Track "last saved" inside the app (so we can show status)
+    st.session_state.last_backup_created_at = saved_at
+    st.session_state.last_saved_hash = state_hash
     return mem.getvalue()
 
 def restore_zip(blob: bytes):
     mem = io.BytesIO(blob)
     with zipfile.ZipFile(mem, "r") as z:
+        names = set(z.namelist())
+
         def read(name):
             with z.open(name) as f:
                 return pd.read_csv(f)
 
-        st.session_state.assets = normalize_assets(read("assets.csv")) if "assets.csv" in z.namelist() else defaults_assets()
-        st.session_state.cards = normalize_cards(read("credit_cards.csv")) if "credit_cards.csv" in z.namelist() else defaults_cards()
-        st.session_state.reim = normalize_reim(read("reimbursements.csv")) if "reimbursements.csv" in z.namelist() else defaults_reim()
-        st.session_state.fixed = normalize_fixed(read("fixed_costs.csv")) if "fixed_costs.csv" in z.namelist() else defaults_fixed()
-        st.session_state.pay = normalize_pay(read("pay_cycle.csv")) if "pay_cycle.csv" in z.namelist() else defaults_pay()
+        if "assets.csv" in names:
+            st.session_state.assets = normalize_assets(read("assets.csv"))
+        else:
+            st.session_state.assets = defaults_assets()
 
-        if "meta.csv" in z.namelist():
+        if "credit_cards.csv" in names:
+            st.session_state.cards = normalize_cards(read("credit_cards.csv"))
+        else:
+            st.session_state.cards = defaults_cards()
+
+        if "reimbursements.csv" in names:
+            st.session_state.reim = normalize_reim(read("reimbursements.csv"))
+        else:
+            st.session_state.reim = defaults_reim()
+
+        if "fixed_costs.csv" in names:
+            st.session_state.fixed = normalize_fixed(read("fixed_costs.csv"))
+        else:
+            st.session_state.fixed = defaults_fixed()
+
+        if "pay_cycle.csv" in names:
+            st.session_state.pay = normalize_pay(read("pay_cycle.csv"))
+        else:
+            st.session_state.pay = defaults_pay()
+
+        # Restore settings / last saved metadata if present
+        if "meta.csv" in names:
             meta = read("meta.csv")
             try:
                 st.session_state.fx_override_on = bool(meta.loc[0, "fx_override_on"])
                 st.session_state.fx_override_rate = float(meta.loc[0, "fx_override_rate"])
+                st.session_state.last_backup_created_at = str(meta.loc[0, "saved_at_utc"])
+                st.session_state.last_saved_hash = str(meta.loc[0, "state_hash"])
             except Exception:
                 pass
 
-with st.sidebar:
-    st.subheader("Save / Load")
+    st.session_state.last_restore_at = utc_now_iso()
 
+# ------------------------
+# Sidebar (Save/Load polish + status)
+# ------------------------
+with st.sidebar:
+    st.subheader("Backup (ZIP)")
+
+    # Status section
+    current_hash = current_state_hash()
+    saved_hash = st.session_state.last_saved_hash
+    dirty = (saved_hash is None) or (current_hash != saved_hash)
+
+    if dirty:
+        badge("Unsaved changes", "warn")
+    else:
+        badge("Saved", "ok")
+
+    if st.session_state.last_backup_created_at:
+        st.caption(f"Last backup created: {st.session_state.last_backup_created_at}")
+    else:
+        st.caption("Last backup created: (none yet)")
+
+    if st.session_state.last_restore_at:
+        st.caption(f"Last restore: {st.session_state.last_restore_at}")
+
+    st.write("")
+
+    # IMPORTANT: we generate zip bytes on-demand so it captures latest data
+    zip_bytes = make_zip()
     st.download_button(
         "⬇️ Download backup (ZIP)",
-        data=make_zip(),
+        data=zip_bytes,
         file_name="stabler-finances-backup.zip",
         mime="application/zip",
         use_container_width=True,
+        help="This ZIP is your single source of truth. Download after you make changes.",
     )
 
+    st.write("")
     up = st.file_uploader("⬆️ Restore from backup (ZIP)", type=["zip"])
     if up is not None:
         restore_zip(up.getvalue())
-        st.success("Backup restored (fields mapped).")
+        st.success("Backup restored.")
         st.rerun()
 
+    st.write("")
     if st.button("Reset to defaults", use_container_width=True):
         st.session_state.assets = defaults_assets()
         st.session_state.cards = defaults_cards()
@@ -390,6 +494,9 @@ with st.sidebar:
         st.session_state.pay = defaults_pay()
         st.session_state.fx_override_on = False
         st.session_state.fx_override_rate = 0.80
+        st.session_state.last_backup_created_at = None
+        st.session_state.last_restore_at = None
+        st.session_state.last_saved_hash = None
         st.rerun()
 
 # ------------------------
@@ -429,12 +536,9 @@ fixed_due_gbp = float(fixed_df.loc[fixed_df["Due?"] == True, "Amount (GBP)"].sum
 fixed_total_gbp = float(fixed_df["Amount (GBP)"].sum())
 
 pay_df = st.session_state.pay.copy()
-# ✅ only count pay lines where Paid? is ticked
 paid_pay_gbp = float(pay_df.loc[pay_df["Paid?"] == True, "Monthly Pay (GBP)"].sum())  # noqa: E712
 
 net_cash_gbp = total_assets_gbp - total_card_bal_gbp + included_reim_gbp
-
-# ✅ Your formula (but with Paid? controlling pay inclusion)
 projected_available_gbp = net_cash_gbp + (paid_pay_gbp - fixed_total_gbp)
 
 # ------------------------
@@ -550,7 +654,7 @@ with d:
 
 with e:
     st.subheader("Monthly Pay")
-    st.caption("Tick Paid? when the salary has landed (only ticked rows count in the projection).")
+    st.caption("Tick Paid? when salary has landed (only ticked rows count in the projection).")
     st.session_state.pay = normalize_pay(
         st.data_editor(
             st.session_state.pay,
@@ -579,12 +683,12 @@ fxl, fxr = st.columns([1.2, 1.0])
 with fxl:
     if live_rate:
         st.markdown(
-            f"""<div class="totals">Live USD→GBP rate: <span class="neu">{live_rate:.4f}</span> (timestamp: {live_ts})</div>""",
+            f"""<div class="totals">Live USD→GBP: <span class="neu">{live_rate:.4f}</span> (timestamp: {live_ts})</div>""",
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
-            f"""<div class="totals">Live FX unavailable right now. Using fallback/override rate: <span class="neu">{rate:.4f}</span></div>""",
+            f"""<div class="totals">Live FX unavailable. Using fallback/override: <span class="neu">{rate:.4f}</span></div>""",
             unsafe_allow_html=True,
         )
 
