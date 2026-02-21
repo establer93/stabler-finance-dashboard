@@ -9,7 +9,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 
-SCHEMA_VERSION = "2026-02-21-stabler-finances-stable-v6-fx-provider-erapi-timestamp"
+SCHEMA_VERSION = "2026-02-21-stabler-finances-stable-v6-ability-surplus-topkpi"
 
 GBP = "GBP"
 USD = "USD"
@@ -130,11 +130,10 @@ def fmt_money(amount: float, currency: str) -> str:
     return f"{sym}{float(amount):,.2f}"
 
 # ------------------------
-# FX feed (UPDATED PROVIDER + 60s cache)
+# FX feed (provider + 60s cache)
 # ------------------------
 @st.cache_data(ttl=60)  # refresh at most once per minute
 def fetch_usd_to_gbp() -> float:
-    # ExchangeRate-API community endpoint (no key)
     r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=8)
     r.raise_for_status()
     data = r.json()
@@ -235,7 +234,7 @@ def defaults_fixed():
     )
 
 def defaults_pay():
-    # Paid? checkbox is used as "exclude from projection" (ticked => excluded)
+    # Unticked included in projection; ticked excluded
     return pd.DataFrame([{"Person": p, "Monthly Pay": amt, "Paid?": False} for p, amt in PAY_ROWS])
 
 def defaults_rac_bills():
@@ -342,10 +341,7 @@ def normalize_rac_bills(df: pd.DataFrame) -> pd.DataFrame:
 # ZIP backup / restore (compatible)
 # ------------------------
 def state_to_zip_bytes(state: dict) -> bytes:
-    meta = {
-        "schema_version": SCHEMA_VERSION,
-        "saved_at_utc": utc_now_iso(),
-    }
+    meta = {"schema_version": SCHEMA_VERSION, "saved_at_utc": utc_now_iso()}
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("meta.json", json.dumps(meta, indent=2))
@@ -372,10 +368,7 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
             fixed = pd.read_csv(z.open("fixed_costs.csv"))
             pay = pd.read_csv(z.open("pay_cycle.csv"))
 
-            if "rac_bills.csv" in names:
-                rac = pd.read_csv(z.open("rac_bills.csv"))
-            else:
-                rac = defaults_rac_bills()
+            rac = pd.read_csv(z.open("rac_bills.csv")) if "rac_bills.csv" in names else defaults_rac_bills()
 
             fx = {"use_live": True, "manual_usd_gbp": 0.80}
             if "fx.json" in names:
@@ -384,19 +377,15 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
                 except Exception:
                     pass
 
-            state = {
+            return {
                 "assets": enforce_assets(assets),
                 "credit_cards": enforce_cards(cards),
                 "reimbursements": enforce_reim(reim),
                 "fixed_costs": normalize_fixed(fixed),
                 "pay_cycle": enforce_pay(pay),
                 "rac_bills": normalize_rac_bills(rac),
-                "fx": {
-                    "use_live": bool(fx.get("use_live", True)),
-                    "manual_usd_gbp": float(fx.get("manual_usd_gbp", 0.80)),
-                },
+                "fx": {"use_live": bool(fx.get("use_live", True)), "manual_usd_gbp": float(fx.get("manual_usd_gbp", 0.80))},
             }
-            return state
     except Exception:
         return None
 
@@ -405,7 +394,6 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
 # ------------------------
 if "app_state" not in st.session_state:
     st.session_state.app_state = default_state()
-
 if "pending_zip_bytes" not in st.session_state:
     st.session_state.pending_zip_bytes = None
 
@@ -459,14 +447,10 @@ with st.sidebar:
 state = st.session_state.app_state
 fx_cfg = state.get("fx", {"use_live": True, "manual_usd_gbp": 0.80})
 
-# Store a "last refreshed" timestamp in session when we actually *pull* FX.
-# - It will still auto-refresh via cache every 60s, but this gives you a visible "last pull".
 if "fx_last_refresh_local" not in st.session_state:
     st.session_state.fx_last_refresh_local = None
 
 usd_to_gbp_live = get_usd_to_gbp_rate()
-
-# If you are using live FX, totals use usd_to_gbp_live. Otherwise manual.
 usd_to_gbp = usd_to_gbp_live if fx_cfg.get("use_live", True) else float(fx_cfg.get("manual_usd_gbp", 0.80))
 
 # ------------------------
@@ -489,29 +473,24 @@ rac_due_this_month_gbp = float(rac_df.loc[rac_df["Month"] == THIS_MONTH, "Amount
 # ------------------------
 # Calculations
 # ------------------------
-assets_total_gbp = float(
-    sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in assets_df.iterrows())
-)
-cards_balance_total_gbp = float(
-    sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows())
-)
-cards_due_total_gbp = float(
-    sum(to_gbp(parse_money(r["Balance Due"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows())
-)
+assets_total_gbp = float(sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in assets_df.iterrows()))
+cards_balance_total_gbp = float(sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows()))
+cards_due_total_gbp = float(sum(to_gbp(parse_money(r["Balance Due"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows()))
 
-reim_included_gbp = float(reim_df.loc[reim_df["Include?"] == True, "Amount"].apply(parse_money).sum())  # noqa: E712
+# reimbursements ALWAYS in net cash
+reim_all_gbp = float(reim_df["Amount"].apply(parse_money).sum())
+# checkbox only for ability-to-repay
+reim_included_for_repay_gbp = float(reim_df.loc[reim_df["Include?"] == True, "Amount"].apply(parse_money).sum())  # noqa: E712
+
 fixed_due_gbp = float(fixed_df.loc[fixed_df["Due?"] == True, "Amount"].sum())  # noqa: E712
-
-# FLIPPED LOGIC:
-# Unticked (Paid? == False) salaries are INCLUDED in projection.
-# Ticked (Paid? == True) are EXCLUDED from projection.
 pay_included_gbp = float(pay_df.loc[pay_df["Paid?"] == False, "Monthly Pay"].apply(parse_money).sum())  # noqa: E712
 
-# RAC is a bill/liability -> subtract it (current month only)
-net_cash_gbp = assets_total_gbp + reim_included_gbp - cards_balance_total_gbp - rac_due_this_month_gbp
+net_cash_gbp = assets_total_gbp + reim_all_gbp - cards_balance_total_gbp - rac_due_this_month_gbp
 remaining_spending_gbp = net_cash_gbp + (pay_included_gbp - fixed_due_gbp)
 
-ability_to_repay = assets_total_gbp >= cards_due_total_gbp
+# Ability to repay = (assets + selected reimbursements) - bills due
+ability_surplus_gbp = (assets_total_gbp + reim_included_for_repay_gbp) - cards_due_total_gbp
+ability_to_repay = ability_surplus_gbp >= 0
 
 # ------------------------
 # KPIs
@@ -526,10 +505,16 @@ with k2:
 <div class="kpi">
   <div class="label">Total Credit Card Bill Due (GBP)</div>
   <div class="value neu">{fmt_money(cards_due_total_gbp, GBP)}</div>
-  <div style="margin-top:8px;">
+
+  <div style="margin-top:10px;">
     <span class="badge {'badge-ok' if ability_to_repay else 'badge-warn'}">
-      Ability to repay (incl. selected reimbursements):: {'Yes' if ability_to_repay else 'No'}
+      Ability to repay (incl. selected reimbursements): {'Yes' if ability_to_repay else 'No'}
     </span>
+  </div>
+
+  <div class="totals" style="margin-top:8px;">
+    Left over / (Shortfall):
+    <span class="{cls(ability_surplus_gbp)}">{fmt_money(ability_surplus_gbp, GBP)}</span>
   </div>
 </div>
 """,
@@ -613,6 +598,7 @@ with b:
 
 with c:
     st.subheader("Reimbursement Pending")
+    st.caption("Always included in Net Cash. Use Include? only for Ability to repay.")
 
     reim_edit = reim_df.copy()
     reim_edit["Amount"] = reim_edit["Amount"].apply(lambda v: fmt_money(parse_money(v), GBP))
@@ -637,7 +623,8 @@ with c:
         st.session_state.app_state["reimbursements"] = enforce_reim(new_reim)
         st.rerun()
 
-    totals_line("Included Reimbursements (GBP):", reim_included_gbp)
+    totals_line("Total Reimbursements (GBP):", reim_all_gbp)
+    totals_line("Included for Ability to repay (GBP):", reim_included_for_repay_gbp)
 
 st.divider()
 
@@ -746,7 +733,7 @@ with e:
 st.divider()
 
 # ------------------------
-# FX bottom (UPDATED: refresh button + timestamp)
+# FX bottom (refresh button + timestamp)
 # ------------------------
 st.subheader("FX (USD → GBP)")
 st.caption("Used only for converting USD balances (Apple Savings / Apple Card) into GBP totals.")
@@ -763,9 +750,7 @@ with fxl:
         st.caption(f"Last refreshed: {st.session_state.fx_last_refresh_local}")
 
     if st.button("🔄 Pull current rate", use_container_width=True):
-        # Force a fresh HTTP call on next run
         fetch_usd_to_gbp.clear()
-        # Record local timestamp (London-ish display; no tz lib needed)
         st.session_state.fx_last_refresh_local = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         st.rerun()
 
