@@ -9,7 +9,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 
-SCHEMA_VERSION = "2026-02-21-stabler-finances-stable-v1"
+SCHEMA_VERSION = "2026-02-21-stabler-finances-stable-v3-rac-default-month-restore-button"
 
 GBP = "GBP"
 USD = "USD"
@@ -57,6 +57,10 @@ st.title("Stabler Family Finances")
 # ------------------------
 def utc_now_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+def current_month_yyyy_mm() -> str:
+    # uses server time; fine for your use case
+    return datetime.now().strftime("%Y-%m")
 
 def cls(x: float) -> str:
     x = float(x)
@@ -113,13 +117,11 @@ def fmt_money(amount: float, currency: str) -> str:
 
 @st.cache_data(ttl=60 * 60)  # 1 hour
 def fetch_usd_to_gbp() -> float:
-    # Safe public endpoint; if it fails we fallback below
     r = requests.get("https://api.exchangerate.host/latest", params={"base": "USD", "symbols": "GBP"}, timeout=8)
     r.raise_for_status()
     return float(r.json()["rates"]["GBP"])
 
 def get_usd_to_gbp_rate() -> float:
-    # cached fetch with fallback
     try:
         return fetch_usd_to_gbp()
     except Exception:
@@ -178,7 +180,7 @@ PAY_ROWS = [
 ]
 
 # ------------------------
-# Defaults (restore full monthly fixed list)
+# Defaults
 # ------------------------
 def defaults_assets():
     return pd.DataFrame([{"Account": a, "Currency": c, "Balance": 0.0} for a, c in ASSET_ROWS])
@@ -190,7 +192,6 @@ def defaults_reim():
     return pd.DataFrame([{"Source": s, "Amount": 0.0, "Include?": inc} for s, inc in REIM_ROWS])
 
 def defaults_fixed():
-    # Full list you had before
     return pd.DataFrame(
         [
             {"Item": "Savings", "Amount": 5000.00, "Due?": True},
@@ -213,6 +214,9 @@ def defaults_fixed():
 def defaults_pay():
     return pd.DataFrame([{"Person": p, "Monthly Pay": amt, "Paid?": False} for p, amt in PAY_ROWS])
 
+def defaults_rac_bills():
+    return pd.DataFrame(columns=["Purchase", "Amount", "Month"])
+
 def default_state():
     return {
         "assets": defaults_assets(),
@@ -220,11 +224,12 @@ def default_state():
         "reimbursements": defaults_reim(),
         "fixed_costs": defaults_fixed(),
         "pay_cycle": defaults_pay(),
+        "rac_bills": defaults_rac_bills(),
         "fx": {"use_live": True, "manual_usd_gbp": 0.80},
     }
 
 # ------------------------
-# Enforce fixed rows on restore
+# Enforce / Normalize
 # ------------------------
 def enforce_assets(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -283,7 +288,6 @@ def normalize_fixed(df: pd.DataFrame) -> pd.DataFrame:
     if "Item" not in df.columns:
         df["Item"] = ""
     if "Amount" not in df.columns:
-        # backward compat if old col name
         if "Amount (GBP)" in df.columns:
             df = df.rename(columns={"Amount (GBP)": "Amount"})
         else:
@@ -296,8 +300,22 @@ def normalize_fixed(df: pd.DataFrame) -> pd.DataFrame:
     df["Due?"] = df["Due?"].fillna(True).astype(bool)
     return df[["Item", "Amount", "Due?"]]
 
+def normalize_rac_bills(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    if "Purchase" not in df.columns:
+        df["Purchase"] = ""
+    if "Amount" not in df.columns:
+        df["Amount"] = 0.0
+    if "Month" not in df.columns:
+        df["Month"] = ""
+
+    df["Purchase"] = df["Purchase"].astype(str).str.strip()
+    df["Amount"] = df["Amount"].apply(parse_money)
+    df["Month"] = df["Month"].astype(str).str.strip()
+    return df[["Purchase", "Amount", "Month"]]
+
 # ------------------------
-# ZIP backup / restore (stable)
+# ZIP backup / restore (compatible)
 # ------------------------
 def state_to_zip_bytes(state: dict) -> bytes:
     meta = {
@@ -312,6 +330,7 @@ def state_to_zip_bytes(state: dict) -> bytes:
         z.writestr("reimbursements.csv", state["reimbursements"].to_csv(index=False))
         z.writestr("fixed_costs.csv", state["fixed_costs"].to_csv(index=False))
         z.writestr("pay_cycle.csv", state["pay_cycle"].to_csv(index=False))
+        z.writestr("rac_bills.csv", state.get("rac_bills", defaults_rac_bills()).to_csv(index=False))
         z.writestr("fx.json", json.dumps(state.get("fx", {"use_live": True, "manual_usd_gbp": 0.80}), indent=2))
     return buf.getvalue()
 
@@ -329,6 +348,12 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
             fixed = pd.read_csv(z.open("fixed_costs.csv"))
             pay = pd.read_csv(z.open("pay_cycle.csv"))
 
+            # RAC is optional for backwards compatibility
+            if "rac_bills.csv" in names:
+                rac = pd.read_csv(z.open("rac_bills.csv"))
+            else:
+                rac = defaults_rac_bills()
+
             fx = {"use_live": True, "manual_usd_gbp": 0.80}
             if "fx.json" in names:
                 try:
@@ -342,6 +367,7 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
                 "reimbursements": enforce_reim(reim),
                 "fixed_costs": normalize_fixed(fixed),
                 "pay_cycle": enforce_pay(pay),
+                "rac_bills": normalize_rac_bills(rac),
                 "fx": {
                     "use_live": bool(fx.get("use_live", True)),
                     "manual_usd_gbp": float(fx.get("manual_usd_gbp", 0.80)),
@@ -356,6 +382,10 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
 # ------------------------
 if "app_state" not in st.session_state:
     st.session_state.app_state = default_state()
+
+# Sidebar pending upload bytes
+if "pending_zip_bytes" not in st.session_state:
+    st.session_state.pending_zip_bytes = None
 
 # ------------------------
 # Sidebar: Save / Load
@@ -376,17 +406,28 @@ with st.sidebar:
 
     up = st.file_uploader("Restore from backup (ZIP)", type=["zip"])
     if up is not None:
-        restored = zip_bytes_to_state(up.read())
-        if restored is None:
-            st.error("That ZIP doesn’t match the expected backup format.")
+        # store uploaded bytes, but don't apply yet
+        st.session_state.pending_zip_bytes = up.read()
+        badge("ZIP ready to restore — tap Update sheet", "warn")
+
+    # NEW BUTTON: apply restore only when pressed
+    if st.button("Update sheet from uploaded ZIP", use_container_width=True):
+        if st.session_state.pending_zip_bytes is None:
+            st.warning("Upload a ZIP first.")
         else:
-            st.session_state.app_state = restored
-            st.success("Backup restored.")
-            st.rerun()
+            restored = zip_bytes_to_state(st.session_state.pending_zip_bytes)
+            if restored is None:
+                st.error("That ZIP doesn’t match the expected backup format.")
+            else:
+                st.session_state.app_state = restored
+                st.session_state.pending_zip_bytes = None
+                st.success("Backup restored.")
+                st.rerun()
 
     st.write("")
     if st.button("Reset to defaults", use_container_width=True):
         st.session_state.app_state = default_state()
+        st.session_state.pending_zip_bytes = None
         st.rerun()
 
 # ------------------------
@@ -406,9 +447,10 @@ cards_df = state["credit_cards"].copy()
 reim_df = state["reimbursements"].copy()
 fixed_df = normalize_fixed(state["fixed_costs"].copy())
 pay_df = state["pay_cycle"].copy()
+rac_df = normalize_rac_bills(state.get("rac_bills", defaults_rac_bills()).copy())
 
 # ------------------------
-# Calculations
+# Calculations (unchanged)
 # ------------------------
 assets_total_gbp = float(sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in assets_df.iterrows()))
 cards_balance_total_gbp = float(sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows()))
@@ -453,7 +495,6 @@ st.divider()
 
 # ------------------------
 # Row 1: Assets | Credit Cards | Reimbursements
-# (Display/edit as formatted currency strings; store parsed floats)
 # ------------------------
 a, b, c = st.columns([1.2, 1.1, 1.1])
 
@@ -553,7 +594,7 @@ with c:
 st.divider()
 
 # ------------------------
-# Row 2: Monthly Fixed | Pay Cycle
+# Row 2: Monthly Fixed | (Right column stacks RAC Bills then Pay)
 # ------------------------
 d, e = st.columns([2.1, 1.0])
 
@@ -593,6 +634,39 @@ with d:
     )
 
 with e:
+    st.subheader("RAC monthly bill")
+    st.caption("GBP only. Add line items. If Month is blank, it will default to the current month on Apply.")
+
+    rac_edit = rac_df.copy()
+    rac_edit["Amount"] = rac_edit["Amount"].apply(lambda v: fmt_money(parse_money(v), GBP))
+
+    edited_rac = st.data_editor(
+        rac_edit[["Purchase", "Amount", "Month"]],
+        hide_index=True,
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "Purchase": st.column_config.TextColumn("Purchase"),
+            "Amount": st.column_config.TextColumn("Amount"),
+            "Month": st.column_config.TextColumn("Month", help="e.g. 2026-02 or Feb 2026"),
+        },
+        key="rac_editor",
+    )
+
+    if st.button("Apply RAC Bill Changes", use_container_width=True):
+        new_rac = edited_rac.copy()
+        new_rac["Amount"] = new_rac["Amount"].apply(parse_money)
+
+        # ✅ Default Month for blank rows
+        default_m = current_month_yyyy_mm()
+        new_rac["Month"] = new_rac["Month"].fillna("").astype(str).str.strip()
+        new_rac.loc[new_rac["Month"] == "", "Month"] = default_m
+
+        st.session_state.app_state["rac_bills"] = normalize_rac_bills(new_rac)
+        st.rerun()
+
+    st.write("")
+
     st.subheader("Monthly Pay")
     st.caption("Tick Paid? when salary has landed (only ticked rows count).")
 
