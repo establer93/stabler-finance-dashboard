@@ -9,7 +9,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 
-SCHEMA_VERSION = "2026-02-21-stabler-finances-stable-v6-ability-surplus-topkpi"
+SCHEMA_VERSION = "2026-02-21-stabler-finances-v8-mainapp-snapshots"
 
 GBP = "GBP"
 USD = "USD"
@@ -248,6 +248,7 @@ def default_state():
         "fixed_costs": defaults_fixed(),
         "pay_cycle": defaults_pay(),
         "rac_bills": defaults_rac_bills(),
+        "snapshots": [],  # NEW
         "fx": {"use_live": True, "manual_usd_gbp": 0.80},
     }
 
@@ -352,6 +353,8 @@ def state_to_zip_bytes(state: dict) -> bytes:
         z.writestr("pay_cycle.csv", state["pay_cycle"].to_csv(index=False))
         z.writestr("rac_bills.csv", state.get("rac_bills", defaults_rac_bills()).to_csv(index=False))
         z.writestr("fx.json", json.dumps(state.get("fx", {"use_live": True, "manual_usd_gbp": 0.80}), indent=2))
+        # NEW: snapshots
+        z.writestr("snapshots.json", json.dumps(state.get("snapshots", []), indent=2))
     return buf.getvalue()
 
 def zip_bytes_to_state(b: bytes) -> dict | None:
@@ -377,6 +380,13 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
                 except Exception:
                     pass
 
+            snapshots = []
+            if "snapshots.json" in names:
+                try:
+                    snapshots = json.loads(z.read("snapshots.json").decode("utf-8"))
+                except Exception:
+                    snapshots = []
+
             return {
                 "assets": enforce_assets(assets),
                 "credit_cards": enforce_cards(cards),
@@ -384,6 +394,7 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
                 "fixed_costs": normalize_fixed(fixed),
                 "pay_cycle": enforce_pay(pay),
                 "rac_bills": normalize_rac_bills(rac),
+                "snapshots": snapshots,  # NEW
                 "fx": {"use_live": bool(fx.get("use_live", True)), "manual_usd_gbp": float(fx.get("manual_usd_gbp", 0.80))},
             }
     except Exception:
@@ -493,9 +504,22 @@ ability_surplus_gbp = (assets_total_gbp + reim_included_for_repay_gbp) - cards_d
 ability_to_repay = ability_surplus_gbp >= 0
 
 # ------------------------
+# Snapshot (NEW)
+# ------------------------
+snapshots = state.get("snapshots", [])
+last_snapshot = snapshots[-1] if snapshots else None
+spent_since_snapshot_gbp = None
+if last_snapshot and isinstance(last_snapshot, dict) and "net_cash_gbp" in last_snapshot:
+    try:
+        spent_since_snapshot_gbp = float(last_snapshot["net_cash_gbp"]) - float(net_cash_gbp)
+    except Exception:
+        spent_since_snapshot_gbp = None
+
+# ------------------------
 # KPIs
 # ------------------------
-k1, k2, k3 = st.columns(3)
+k1, k2, k3, k4 = st.columns(4)
+
 with k1:
     kpi("Net Cash (GBP)", net_cash_gbp)
 
@@ -523,6 +547,34 @@ with k2:
 
 with k3:
     kpi("Remaining spending this month (GBP)", remaining_spending_gbp)
+
+with k4:
+    if spent_since_snapshot_gbp is None:
+        st.markdown(
+            """
+<div class="kpi">
+  <div class="label">Spent Since Last Snapshot (GBP)</div>
+  <div class="value neu">No snapshot yet</div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+    else:
+        kpi("Spent Since Last Snapshot (GBP)", spent_since_snapshot_gbp)
+
+# NEW: Snapshot save controls
+snap_col1, snap_col2 = st.columns([1.0, 2.0])
+with snap_col1:
+    if st.button("📌 Save Snapshot", use_container_width=True):
+        state.setdefault("snapshots", []).append(
+            {"timestamp_utc": utc_now_iso(), "net_cash_gbp": float(net_cash_gbp)}
+        )
+        st.success("Snapshot saved.")
+        st.rerun()
+
+with snap_col2:
+    if last_snapshot and isinstance(last_snapshot, dict) and last_snapshot.get("timestamp_utc"):
+        st.caption(f"Last snapshot: {last_snapshot['timestamp_utc']}")
 
 st.divider()
 
