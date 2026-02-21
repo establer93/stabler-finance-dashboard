@@ -595,38 +595,85 @@ if st.session_state.do_snapshot:
     st.session_state.do_snapshot = False
     st.rerun()
 
-# Snapshot delta line
+# Snapshot panel (nicer on-screen)
 snapshot = state.get("snapshot", None)
 snapshot_net_cash = None
 snapshot_time = None
 spent_since_snapshot_gbp = None
 delta_since_snapshot_gbp = None
+
 if isinstance(snapshot, dict):
-    snapshot_net_cash = snapshot.get("net_cash_gbp", None)
     snapshot_time = snapshot.get("saved_at_local", None)
     try:
-        if snapshot_net_cash is not None:
-            snapshot_net_cash = float(snapshot_net_cash)
-            delta_since_snapshot_gbp = float(net_cash_gbp - snapshot_net_cash)
-            spent_since_snapshot_gbp = float(snapshot_net_cash - net_cash_gbp)
+        snapshot_net_cash = float(snapshot.get("net_cash_gbp", 0.0))
+        delta_since_snapshot_gbp = float(net_cash_gbp - snapshot_net_cash)
+        spent_since_snapshot_gbp = float(snapshot_net_cash - net_cash_gbp)
     except Exception:
         snapshot_net_cash = None
-        snapshot_time = None
-        spent_since_snapshot_gbp = None
-        delta_since_snapshot_gbp = None
 
-# ------------------------
-# Show apply results (from last run)
-# ------------------------
-if st.session_state.last_apply_success:
-    st.success("Applied all changes.")
-    st.session_state.last_apply_success = False
+if snapshot_net_cash is not None:
+    st.markdown("### Snapshot")
 
-if st.session_state.last_apply_errors:
-    st.warning(
-        "Some values were invalid and were saved as £0.00:\n- " + "\n- ".join(st.session_state.last_apply_errors)
-    )
-    st.session_state.last_apply_errors = []
+    s1, s2, s3 = st.columns([1.4, 1.3, 1.3])
+    with s1:
+        st.markdown(
+            f"""
+<div style="
+  border:1px solid rgba(255,255,255,0.12);
+  border-radius:14px;
+  padding:14px 16px;
+  background: rgba(255,255,255,0.03);
+">
+  <div style="opacity:0.75; font-size:13px; margin-bottom:6px;">Saved at</div>
+  <div style="font-size:18px; font-weight:650;">{snapshot_time}</div>
+  <div class="totals" style="margin-top:10px;">
+    Snapshot Net Cash: <span class="{cls(snapshot_net_cash)}">{fmt_money(snapshot_net_cash, GBP)}</span>
+  </div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    with s2:
+        st.markdown(
+            f"""
+<div style="
+  border:1px solid rgba(255,255,255,0.12);
+  border-radius:14px;
+  padding:14px 16px;
+  background: rgba(255,255,255,0.03);
+">
+  <div style="opacity:0.75; font-size:13px; margin-bottom:6px;">Change in Net Cash</div>
+  <div style="font-size:28px; font-weight:750;" class="{cls(delta_since_snapshot_gbp)}">
+    {fmt_money(delta_since_snapshot_gbp, GBP)}
+  </div>
+  <div class="totals">Since the snapshot</div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    with s3:
+        spent_display = float(spent_since_snapshot_gbp)
+        spent_css = "neg" if spent_display > 0 else "pos" if spent_display < 0 else "neu"
+
+        st.markdown(
+            f"""
+<div style="
+  border:1px solid rgba(255,255,255,0.12);
+  border-radius:14px;
+  padding:14px 16px;
+  background: rgba(255,255,255,0.03);
+">
+  <div style="opacity:0.75; font-size:13px; margin-bottom:6px;">Spent since snapshot</div>
+  <div style="font-size:28px; font-weight:750;" class="{spent_css}">
+    {fmt_money(abs(spent_display), GBP)}
+  </div>
+  <div class="totals">{'Net spend' if spent_display >= 0 else 'Net increase'}</div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
 
 # ------------------------
 # KPIs
