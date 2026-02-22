@@ -442,7 +442,7 @@ def supabase_upsert_state(state: dict, row_id: str = "stabler"):
     url = st.secrets["SUPABASE_URL"].rstrip("/") + "/rest/v1/app_state"
     payload = [{
         "id": row_id,
-        "state_json": state,
+        "state_json": state_to_jsonable(state),
         "schema_version": SCHEMA_VERSION,
         "updated_at": utc_now_iso(),
     }]
