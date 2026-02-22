@@ -421,6 +421,28 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
 # ------------------------
 # Supabase REST (no supabase Python package needed)
 # ------------------------
+
+# ------------------------
+# Supabase REST (no supabase Python package needed)
+# ------------------------
+
+def state_to_jsonable(state: dict) -> dict:
+    def df_to_records(x):
+        if isinstance(x, pd.DataFrame):
+            return x.to_dict(orient="records")
+        return x
+
+    out = {}
+    for k, v in state.items():
+        out[k] = df_to_records(v)
+
+    out["fx"] = out.get("fx", {"use_live": True, "manual_usd_gbp": 0.80})
+    out["meta"] = out.get("meta", {"last_apply_local": None, "fx_last_refresh_local": None})
+    return out
+
+
+def supabase_configured() -> bool:
+
 def supabase_configured() -> bool:
     return (
         "SUPABASE_URL" in st.secrets
