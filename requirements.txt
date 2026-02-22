@@ -1,9 +1,5 @@
-supabase>=2.0.0
-postgrest>=0.16.0
-gotrue>=2.0.0
-realtime>=2.0.0
-storage3>=0.7.0
-httpx>=0.25.0
+streamlit>=1.40.0
 pandas
 requests
-streamlit
+supabase
+altair>=5
