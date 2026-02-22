@@ -11,7 +11,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 
-SCHEMA_VERSION = "2026-02-22-stabler-finances-stable-v9-truelayer-hsbc-joint-sync"
+SCHEMA_VERSION = "2026-02-22-stabler-finances-stable-v10-truelayer-fixed-auth-redirect-hsbc-joint-sync"
 
 GBP = "GBP"
 USD = "USD"
@@ -58,11 +58,14 @@ div[data-testid="stSidebar"] .stDownloadButton button {
 def utc_now_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
+
 def local_now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+
 def current_month_yyyy_mm() -> str:
     return datetime.now().strftime("%Y-%m")
+
 
 def month_options_yyyy_mm() -> list[str]:
     now = datetime.now()
@@ -74,6 +77,7 @@ def month_options_yyyy_mm() -> list[str]:
             opts.append(f"{y:04d}-{m:02d}")
     return opts
 
+
 def cls(x: float) -> str:
     x = float(x)
     if x > 0:
@@ -82,9 +86,11 @@ def cls(x: float) -> str:
         return "neg"
     return "neu"
 
+
 def badge(text: str, kind: str = "neutral"):
     klass = {"ok": "badge-ok", "warn": "badge-warn", "neutral": "badge-neutral"}.get(kind, "badge-neutral")
     st.markdown(f"<span class='badge {klass}'>{text}</span>", unsafe_allow_html=True)
+
 
 def _safe_plus_minus(expr: str) -> float:
     """
@@ -131,14 +137,17 @@ def _safe_plus_minus(expr: str) -> float:
         total += float(p)
     return float(total)
 
+
 def parse_money(value) -> float:
     if isinstance(value, (int, float)):
         return float(value)
     return _safe_plus_minus(value)
 
+
 def fmt_money(amount: float, currency: str) -> str:
     sym = CURRENCY_SYMBOL.get((currency or GBP).upper(), "")
     return f"{sym}{float(amount):,.2f}"
+
 
 # ------------------------
 # FX feed (provider + cache)
@@ -153,11 +162,13 @@ def fetch_usd_to_gbp() -> float:
         raise ValueError("GBP missing from FX response")
     return float(gbp)
 
+
 def get_usd_to_gbp_rate() -> float:
     try:
         return fetch_usd_to_gbp()
     except Exception:
         return 0.80
+
 
 def to_gbp(amount: float, currency: str, usd_to_gbp: float) -> float:
     cur = (currency or GBP).upper()
@@ -166,6 +177,7 @@ def to_gbp(amount: float, currency: str, usd_to_gbp: float) -> float:
     if cur == USD:
         return float(amount) * float(usd_to_gbp)
     return float(amount)
+
 
 def kpi(label: str, value_gbp: float, force_neutral: bool = False):
     css = "neu" if force_neutral else cls(value_gbp)
@@ -179,11 +191,13 @@ def kpi(label: str, value_gbp: float, force_neutral: bool = False):
         unsafe_allow_html=True,
     )
 
+
 def totals_line(label: str, value_gbp: float, currency: str = GBP):
     st.markdown(
         f"""<div class="totals">{label} <span class="{cls(value_gbp)}">{fmt_money(value_gbp, currency)}</span></div>""",
         unsafe_allow_html=True,
     )
+
 
 # ------------------------
 # Fixed row templates
@@ -211,17 +225,21 @@ PAY_ROWS = [
     ("Gigi", 6000.0),
 ]
 
+
 # ------------------------
 # Defaults
 # ------------------------
 def defaults_assets():
     return pd.DataFrame([{"Account": a, "Currency": c, "Balance": 0.0} for a, c in ASSET_ROWS])
 
+
 def defaults_cards():
     return pd.DataFrame([{"Card": n, "Currency": c, "Balance": 0.0, "Balance Due": 0.0} for n, c in CARD_ROWS])
 
+
 def defaults_reim():
     return pd.DataFrame([{"Source": s, "Amount": 0.0, "Include?": inc} for s, inc in REIM_ROWS])
+
 
 def defaults_fixed():
     return pd.DataFrame(
@@ -243,12 +261,15 @@ def defaults_fixed():
         ]
     )
 
+
 def defaults_pay():
     # unticked included in projection, ticked excluded
     return pd.DataFrame([{"Person": p, "Monthly Pay": amt, "Paid?": False} for p, amt in PAY_ROWS])
 
+
 def defaults_rac_bills():
     return pd.DataFrame(columns=["Purchase", "Amount", "Month"])
+
 
 def default_meta():
     return {
@@ -259,7 +280,9 @@ def default_meta():
             "HSBC": {"account_id": None},
             "Lloyds": {"account_id": None},
         },
+        "bank_last_sync_local": None,
     }
+
 
 def default_state():
     return {
@@ -272,6 +295,7 @@ def default_state():
         "fx": {"use_live": True, "manual_usd_gbp": 0.80},
         "meta": default_meta(),
     }
+
 
 # ------------------------
 # Enforce / Normalize
@@ -287,6 +311,7 @@ def enforce_assets(df: pd.DataFrame) -> pd.DataFrame:
         out.append({"Account": name, "Currency": cur, "Balance": bal})
     return pd.DataFrame(out)
 
+
 def enforce_cards(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     for col in ["Balance", "Balance Due"]:
@@ -299,6 +324,7 @@ def enforce_cards(df: pd.DataFrame) -> pd.DataFrame:
         due = parse_money(m["Balance Due"].iloc[0]) if len(m) else 0.0
         out.append({"Card": name, "Currency": cur, "Balance": bal, "Balance Due": due})
     return pd.DataFrame(out)
+
 
 def enforce_reim(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -314,6 +340,7 @@ def enforce_reim(df: pd.DataFrame) -> pd.DataFrame:
         out.append({"Source": src, "Amount": amt, "Include?": inc})
     return pd.DataFrame(out)
 
+
 def enforce_pay(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "Monthly Pay" not in df.columns:
@@ -327,6 +354,7 @@ def enforce_pay(df: pd.DataFrame) -> pd.DataFrame:
         paid = bool(m["Paid?"].iloc[0]) if len(m) else False
         out.append({"Person": person, "Monthly Pay": pay, "Paid?": paid})
     return pd.DataFrame(out)
+
 
 def normalize_fixed(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -345,6 +373,7 @@ def normalize_fixed(df: pd.DataFrame) -> pd.DataFrame:
     df["Due?"] = df["Due?"].fillna(True).astype(bool)
     return df[["Item", "Amount", "Due?"]]
 
+
 def normalize_rac_bills(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     for col in ["Purchase", "Amount", "Month"]:
@@ -354,6 +383,7 @@ def normalize_rac_bills(df: pd.DataFrame) -> pd.DataFrame:
     df["Amount"] = df["Amount"].apply(parse_money)
     df["Month"] = df["Month"].fillna("").astype(str).str.strip()
     return df[["Purchase", "Amount", "Month"]]
+
 
 # ------------------------
 # ZIP backup / restore
@@ -372,6 +402,7 @@ def state_to_zip_bytes(state: dict) -> bytes:
         z.writestr("fx.json", json.dumps(state.get("fx", {"use_live": True, "manual_usd_gbp": 0.80}), indent=2))
         z.writestr("appmeta.json", json.dumps(state.get("meta", {}), indent=2))
     return buf.getvalue()
+
 
 def zip_bytes_to_state(b: bytes) -> dict | None:
     try:
@@ -401,16 +432,13 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
                     loaded_meta = json.loads(z.read("appmeta.json").decode("utf-8"))
                     if isinstance(loaded_meta, dict):
                         meta.update(loaded_meta)
-                        # ensure bank_map exists
                         if "bank_map" not in meta or not isinstance(meta["bank_map"], dict):
                             meta["bank_map"] = default_meta()["bank_map"]
-                        else:
-                            # ensure keys exist
-                            for k in ["HSBC", "Lloyds"]:
-                                if k not in meta["bank_map"]:
-                                    meta["bank_map"][k] = {"account_id": None}
-                                elif "account_id" not in meta["bank_map"][k]:
-                                    meta["bank_map"][k]["account_id"] = None
+                        for k in ["HSBC", "Lloyds"]:
+                            if k not in meta["bank_map"]:
+                                meta["bank_map"][k] = {"account_id": None}
+                            elif "account_id" not in meta["bank_map"][k]:
+                                meta["bank_map"][k]["account_id"] = None
                 except Exception:
                     pass
 
@@ -429,6 +457,7 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
             }
     except Exception:
         return None
+
 
 # ------------------------
 # Supabase REST (no supabase Python package needed)
@@ -450,6 +479,7 @@ def state_to_jsonable(state: dict) -> dict:
     out["meta"] = out.get("meta", default_meta())
     return out
 
+
 def supabase_configured() -> bool:
     return (
         "SUPABASE_URL" in st.secrets
@@ -457,6 +487,7 @@ def supabase_configured() -> bool:
         and str(st.secrets.get("SUPABASE_URL", "")).strip() != ""
         and str(st.secrets.get("SUPABASE_ANON_KEY", "")).strip() != ""
     )
+
 
 def supabase_headers():
     key = st.secrets["SUPABASE_ANON_KEY"]
@@ -466,6 +497,7 @@ def supabase_headers():
         "Content-Type": "application/json",
         "Prefer": "return=representation, resolution=merge-duplicates",
     }
+
 
 def supabase_upsert_state(state: dict, row_id: str = "stabler"):
     url = st.secrets["SUPABASE_URL"].rstrip("/") + "/rest/v1/app_state"
@@ -479,6 +511,7 @@ def supabase_upsert_state(state: dict, row_id: str = "stabler"):
     r.raise_for_status()
     return r.json()
 
+
 def supabase_get_state(row_id: str = "stabler") -> dict | None:
     url = st.secrets["SUPABASE_URL"].rstrip("/") + f"/rest/v1/app_state?id=eq.{row_id}&select=state_json"
     r = requests.get(url, headers=supabase_headers(), timeout=12)
@@ -488,16 +521,22 @@ def supabase_get_state(row_id: str = "stabler") -> dict | None:
         return None
     return rows[0].get("state_json", None)
 
+
 # ------------------------
 # TrueLayer + Supabase bank_connections (service role)
 # ------------------------
-TRUELAYER_AUTH_URL = "https://auth.truelayer.com/connect/authorize"
+# IMPORTANT: TrueLayer is strict:
+# - Authorize URL must be /connect/authorize
+# - redirect_uri must match EXACTLY what's registered in TrueLayer Console
+TRUELAYER_AUTHORIZE_URL = "https://auth.truelayer.com/connect/authorize"
 TRUELAYER_TOKEN_URL = "https://auth.truelayer.com/connect/token"
 TRUELAYER_DATA_API = "https://api.truelayer.com/data/v1"
+
 
 def truelayer_configured() -> bool:
     needed = ["TRUELAYER_CLIENT_ID", "TRUELAYER_CLIENT_SECRET", "TRUELAYER_REDIRECT_URI"]
     return all(k in st.secrets and str(st.secrets.get(k, "")).strip() != "" for k in needed)
+
 
 def supabase_service_configured() -> bool:
     return (
@@ -506,6 +545,7 @@ def supabase_service_configured() -> bool:
         and str(st.secrets.get("SUPABASE_URL", "")).strip() != ""
         and str(st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "")).strip() != ""
     )
+
 
 def supabase_service_headers():
     key = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
@@ -516,7 +556,9 @@ def supabase_service_headers():
         "Prefer": "return=representation, resolution=merge-duplicates",
     }
 
+
 def build_truelayer_auth_url(owner: str, bank_name: str) -> str:
+    # NOTE: Keep the scope minimal since you only want balances
     params = {
         "response_type": "code",
         "client_id": st.secrets["TRUELAYER_CLIENT_ID"],
@@ -525,6 +567,7 @@ def build_truelayer_auth_url(owner: str, bank_name: str) -> str:
         "state": f"{owner}|{bank_name}",
     }
     return f"{TRUELAYER_AUTHORIZE_URL}?{urllib.parse.urlencode(params)}"
+
 
 def truelayer_exchange_code_for_tokens(code: str) -> dict:
     r = requests.post(
@@ -541,6 +584,7 @@ def truelayer_exchange_code_for_tokens(code: str) -> dict:
     r.raise_for_status()
     return r.json()
 
+
 def truelayer_refresh_access_token(refresh_token: str) -> str:
     r = requests.post(
         TRUELAYER_TOKEN_URL,
@@ -555,6 +599,7 @@ def truelayer_refresh_access_token(refresh_token: str) -> str:
     r.raise_for_status()
     return r.json()["access_token"]
 
+
 def supabase_upsert_bank_connection(bank_name: str, owner: str, refresh_token: str):
     url = st.secrets["SUPABASE_URL"].rstrip("/") + "/rest/v1/bank_connections"
     payload = [{
@@ -567,11 +612,13 @@ def supabase_upsert_bank_connection(bank_name: str, owner: str, refresh_token: s
     r.raise_for_status()
     return r.json()
 
+
 def supabase_get_bank_connections() -> list[dict]:
     url = st.secrets["SUPABASE_URL"].rstrip("/") + "/rest/v1/bank_connections?select=bank_name,owner,refresh_token,updated_at"
     r = requests.get(url, headers=supabase_service_headers(), timeout=12)
     r.raise_for_status()
     return r.json()
+
 
 def truelayer_get_accounts(access_token: str) -> list[dict]:
     r = requests.get(
@@ -581,6 +628,7 @@ def truelayer_get_accounts(access_token: str) -> list[dict]:
     )
     r.raise_for_status()
     return r.json().get("results", [])
+
 
 def truelayer_get_balance(access_token: str, account_id: str) -> float:
     r = requests.get(
@@ -594,10 +642,12 @@ def truelayer_get_balance(access_token: str, account_id: str) -> float:
         return 0.0
     return float(results[0].get("current", 0.0))
 
+
 def pick_hsbc_joint_account(accounts: list[dict]) -> str | None:
     """
     Prefer an account whose display_name contains 'joint' (case-insensitive).
-    Fall back to first account.
+    Fall back to first account ONLY if there is exactly one.
+    Otherwise return None so user picks once.
     """
     if not accounts:
         return None
@@ -605,10 +655,10 @@ def pick_hsbc_joint_account(accounts: list[dict]) -> str | None:
         name = str(a.get("display_name", "")).lower()
         if "joint" in name:
             return a.get("account_id")
-    # no obvious joint -> let UI pick later (None) if multiple
     if len(accounts) == 1:
         return accounts[0].get("account_id")
     return None
+
 
 # ------------------------
 # TrueLayer callback handler (runs early)
@@ -638,6 +688,7 @@ if qp.get("tl") == "callback" and "code" in qp and "state" in qp:
     except Exception as e:
         st.error(f"TrueLayer connection failed: {e}")
 
+
 # ------------------------
 # Session init
 # ------------------------
@@ -661,7 +712,7 @@ for k in ["HSBC", "Lloyds"]:
 state = st.session_state.app_state
 
 # ------------------------
-# Title row with Apply button on the right
+# Title row
 # ------------------------
 tcol1, tcol2 = st.columns([3, 1])
 with tcol1:
@@ -724,6 +775,7 @@ with st.sidebar:
             if st.button("⬆️ Save to Supabase", use_container_width=True):
                 try:
                     supabase_upsert_state(st.session_state.app_state, "stabler")
+                    st.success("Saved.")
                 except Exception as e:
                     st.error(f"Save failed: {e}")
         with c2:
@@ -734,7 +786,6 @@ with st.sidebar:
                         st.warning("No row found for id='stabler'.")
                     else:
                         loaded_meta = loaded.get("meta", default_meta())
-                        # ensure meta/bank_map shape
                         if not isinstance(loaded_meta, dict):
                             loaded_meta = default_meta()
                         if "bank_map" not in loaded_meta or not isinstance(loaded_meta["bank_map"], dict):
@@ -756,6 +807,7 @@ with st.sidebar:
                             "meta": loaded_meta,
                         }
                         st.session_state.app_state = loaded_state
+                        st.success("Loaded.")
                         st.rerun()
                 except Exception as e:
                     st.error(f"Load failed: {e}")
@@ -763,106 +815,75 @@ with st.sidebar:
     st.divider()
     st.subheader("Bank feeds (TrueLayer)")
 
+    # quick visible debug so you can see what you're actually sending
+    if truelayer_configured():
+        st.caption(f"Redirect URI in secrets: {st.secrets['TRUELAYER_REDIRECT_URI']}")
+        st.caption(f"Client ID in secrets: {st.secrets['TRUELAYER_CLIENT_ID']}")
+    else:
+        st.caption("TrueLayer not configured in Streamlit secrets (missing one of client_id/client_secret/redirect_uri).")
+
     if not truelayer_configured():
-        st.caption("TrueLayer not configured in Streamlit secrets.")
+        st.info("Add TRUELAYER_CLIENT_ID, TRUELAYER_CLIENT_SECRET, TRUELAYER_REDIRECT_URI to Streamlit Secrets.")
     elif not supabase_service_configured():
-        st.caption("Supabase service role key missing (needed to store refresh tokens safely).")
+        st.info("Add SUPABASE_SERVICE_ROLE_KEY to Streamlit Secrets (needed to store refresh tokens).")
     else:
         hsbc_link = build_truelayer_auth_url("Eric", "HSBC")
-        lloyds_link = build_truelayer_auth_url("Gigi", "Lloyds")
         st.markdown(f"[🔗 Connect HSBC (Eric)]({hsbc_link})")
-        st.markdown(f"[🔗 Connect Lloyds (Gigi)]({lloyds_link})")
 
-        st.caption("Connect once per bank. Then use Sync to pull balances into Assets.")
+        st.caption("Connect once. Then use Sync to pull HSBC balance into Assets (HSBC row).")
 
-        # Optional selector appears when HSBC has multiple accounts and joint is not obvious
-        hsbc_manual_choice = None
-        if st.session_state.app_state["meta"]["bank_map"]["HSBC"].get("account_id") is None:
-            st.caption("HSBC joint account selection (only needed once).")
-
-        if st.button("🔄 Sync All Banks", use_container_width=True):
+        if st.button("🔄 Sync HSBC", use_container_width=True):
             try:
                 conns = supabase_get_bank_connections()
-                if not conns:
-                    st.warning("No bank connections found yet. Click Connect HSBC/Lloyds first.")
-                else:
-                    updated_assets = enforce_assets(st.session_state.app_state["assets"].copy())
+                hsbc = [c for c in conns if c.get("bank_name") == "HSBC" and c.get("refresh_token")]
 
-                    # We'll gather HSBC accounts for a possible manual pick if needed
-                    hsbc_accounts_for_ui = None
+                if not hsbc:
+                    st.warning("No HSBC connection found yet. Click Connect HSBC first.")
+                    st.stop()
 
-                    for conn in conns:
-                        bank = conn.get("bank_name")
-                        refresh = conn.get("refresh_token")
-                        if not bank or not refresh:
-                            continue
+                refresh = hsbc[0]["refresh_token"]
+                access = truelayer_refresh_access_token(refresh)
+                accounts = truelayer_get_accounts(access)
 
-                        access = truelayer_refresh_access_token(refresh)
-                        accounts = truelayer_get_accounts(access)
-                        if not accounts:
-                            continue
+                if not accounts:
+                    st.warning("TrueLayer returned no accounts. Try reconnecting HSBC.")
+                    st.stop()
 
-                        saved_id = st.session_state.app_state["meta"]["bank_map"].get(bank, {}).get("account_id")
+                saved_id = st.session_state.app_state["meta"]["bank_map"]["HSBC"].get("account_id")
+                account_id = saved_id or pick_hsbc_joint_account(accounts)
 
-                        account_id = None
-                        if saved_id:
-                            account_id = saved_id
-                        else:
-                            if bank == "HSBC":
-                                # try auto-detect joint by name
-                                picked = pick_hsbc_joint_account(accounts)
-                                if picked:
-                                    account_id = picked
-                                    st.session_state.app_state["meta"]["bank_map"]["HSBC"]["account_id"] = picked
-                                else:
-                                    # keep for UI selection after loop
-                                    hsbc_accounts_for_ui = accounts
-                                    continue
-                            else:
-                                # Lloyds: default to first
-                                account_id = accounts[0].get("account_id")
-                                if account_id:
-                                    st.session_state.app_state["meta"]["bank_map"]["Lloyds"]["account_id"] = account_id
+                if not account_id:
+                    # user must pick once
+                    options = []
+                    mapping = {}
+                    for a in accounts:
+                        aid = a.get("account_id")
+                        disp = a.get("display_name", "") or ""
+                        atype = a.get("account_type", "") or ""
+                        currency = a.get("currency", "") or ""
+                        label = f"{disp}  ({atype})  {currency}  •  {aid[:8]}…"
+                        options.append(label)
+                        mapping[label] = aid
 
-                        if not account_id:
-                            continue
+                    st.warning("Multiple HSBC accounts found. Pick your JOINT account once, save, then Sync again.")
+                    choice = st.selectbox("Select HSBC joint account", options=options, index=0)
+                    if st.button("💾 Save HSBC selection", use_container_width=True):
+                        st.session_state.app_state["meta"]["bank_map"]["HSBC"]["account_id"] = mapping[choice]
+                        st.success("Saved. Now click Sync HSBC again.")
+                        st.rerun()
+                    st.stop()
 
-                        bal = truelayer_get_balance(access, account_id)
+                bal = truelayer_get_balance(access, account_id)
 
-                        if bank == "HSBC":
-                            updated_assets.loc[updated_assets["Account"] == "HSBC", "Balance"] = float(bal)
-                        elif bank == "Lloyds":
-                            updated_assets.loc[updated_assets["Account"] == "Lloyds", "Balance"] = float(bal)
+                updated_assets = enforce_assets(st.session_state.app_state["assets"].copy())
+                updated_assets.loc[updated_assets["Account"] == "HSBC", "Balance"] = float(bal)
+                st.session_state.app_state["assets"] = enforce_assets(updated_assets)
 
-                    # If HSBC needs manual picking, show selector + stop here
-                    if hsbc_accounts_for_ui is not None:
-                        # Render selector + save button in sidebar after sync click
-                        options = []
-                        mapping = {}
-                        for a in hsbc_accounts_for_ui:
-                            aid = a.get("account_id")
-                            disp = a.get("display_name", "") or ""
-                            atype = a.get("account_type", "") or ""
-                            label = f"{disp}  ({atype})  •  {aid[:8]}…"
-                            options.append(label)
-                            mapping[label] = aid
+                st.session_state.app_state["meta"]["bank_last_sync_local"] = local_now_str()
+                st.session_state.app_state["meta"]["last_apply_local"] = local_now_str()
 
-                        if options:
-                            st.warning("HSBC has multiple accounts. Please choose your JOINT account below, then press Sync again.")
-                            choice = st.selectbox("Select HSBC joint account", options=options, index=0)
-                            if st.button("Save HSBC selection", use_container_width=True):
-                                st.session_state.app_state["meta"]["bank_map"]["HSBC"]["account_id"] = mapping[choice]
-                                st.rerun()
-                        else:
-                            st.warning("HSBC accounts returned, but none were selectable. Try reconnecting HSBC.")
-                        st.stop()
-
-                    st.session_state.app_state["assets"] = enforce_assets(updated_assets)
-
-                    # stamp + (optional) auto-save app_state to Supabase row 'stabler'
-                    st.session_state.app_state["meta"]["last_apply_local"] = local_now_str()
-
-                    st.rerun()
+                st.success("HSBC balance synced into Assets.")
+                st.rerun()
 
             except Exception as e:
                 st.error(f"Sync failed: {e}")
@@ -901,9 +922,7 @@ assets_total_gbp = float(sum(to_gbp(parse_money(r["Balance"]), r["Currency"], us
 cards_balance_total_gbp = float(sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows()))
 cards_due_total_gbp = float(sum(to_gbp(parse_money(r["Balance Due"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows()))
 
-# reimbursements ALWAYS in net cash
 reim_all_gbp = float(reim_df["Amount"].apply(parse_money).sum())
-# checkbox only for ability-to-repay
 reim_included_for_repay_gbp = float(reim_df.loc[reim_df["Include?"] == True, "Amount"].apply(parse_money).sum())  # noqa: E712
 
 fixed_due_gbp = float(fixed_df.loc[fixed_df["Due?"] == True, "Amount"].sum())  # noqa: E712
@@ -912,7 +931,6 @@ pay_included_gbp = float(pay_df.loc[pay_df["Paid?"] == False, "Monthly Pay"].app
 net_cash_gbp = assets_total_gbp + reim_all_gbp - cards_balance_total_gbp - rac_due_this_month_gbp
 remaining_spending_gbp = net_cash_gbp + (pay_included_gbp - fixed_due_gbp)
 
-# Ability to repay = (assets + selected reimbursements) - bills due
 ability_surplus_gbp = (assets_total_gbp + reim_included_for_repay_gbp) - cards_due_total_gbp
 ability_to_repay = ability_surplus_gbp >= 0
 
@@ -954,9 +972,6 @@ st.divider()
 # ONE MAIN APPLY (FORM)
 # ------------------------
 with st.form("apply_all_form", clear_on_submit=False):
-    # ------------------------
-    # Row 1: Assets | Credit Cards | Reimbursements
-    # ------------------------
     a, b, c = st.columns([1.2, 1.1, 1.1])
 
     with a:
@@ -1036,9 +1051,6 @@ with st.form("apply_all_form", clear_on_submit=False):
 
     st.divider()
 
-    # ------------------------
-    # Row 2: Monthly Fixed | (Right column stacks RAC Bills then Pay)
-    # ------------------------
     d, e = st.columns([2.1, 1.0])
 
     with d:
@@ -1114,9 +1126,6 @@ with st.form("apply_all_form", clear_on_submit=False):
 
     st.divider()
 
-    # ------------------------
-    # FX bottom (inside form so "Apply all changes" can persist settings)
-    # ------------------------
     st.subheader("FX (USD → GBP)")
     st.caption("Used only for converting USD balances (Apple Savings / Apple Card) into GBP totals.")
 
@@ -1133,7 +1142,12 @@ with st.form("apply_all_form", clear_on_submit=False):
 
     with fxr:
         use_live = st.toggle("Use live FX", value=bool(fx_cfg.get("use_live", True)))
-        manual = st.number_input("Manual USD→GBP", value=float(fx_cfg.get("manual_usd_gbp", 0.80)), step=0.0001, format="%.4f")
+        manual = st.number_input(
+            "Manual USD→GBP",
+            value=float(fx_cfg.get("manual_usd_gbp", 0.80)),
+            step=0.0001,
+            format="%.4f",
+        )
 
     apply_all = st.form_submit_button("✅ Apply all changes", use_container_width=True)
 
@@ -1192,5 +1206,7 @@ if apply_all:
 # Timestamp under Apply button (no green bar)
 # ------------------------
 meta = st.session_state.app_state.get("meta", {})
+if meta.get("bank_last_sync_local"):
+    st.caption(f"Last bank sync: {meta['bank_last_sync_local']}")
 if meta.get("last_apply_local"):
     st.caption(f"Last change applied: {meta['last_apply_local']}")
