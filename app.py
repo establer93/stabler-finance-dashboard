@@ -524,7 +524,7 @@ def build_truelayer_auth_url(owner: str, bank_name: str) -> str:
         "scope": "accounts balance offline_access",
         "state": f"{owner}|{bank_name}",
     }
-    return f"{TRUELAYER_AUTH_URL}?{urllib.parse.urlencode(params)}"
+    return f"{TRUELAYER_AUTHORIZE_URL}?{urllib.parse.urlencode(params)}"
 
 def truelayer_exchange_code_for_tokens(code: str) -> dict:
     r = requests.post(
