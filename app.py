@@ -1,5 +1,7 @@
+import ast
 import io
 import json
+import re
 import zipfile
 from datetime import datetime, timezone
 
@@ -9,11 +11,14 @@ import streamlit as st
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 
-SCHEMA_VERSION = "2026-02-21-stabler-finances-stable-v11-single-apply-timestamp-no-successbar"
+SCHEMA_VERSION = "2026-02-22-stabler-finances-stable-v7-supabase-autosave"
+
+APP_STATE_ID = "stabler"
 
 GBP = "GBP"
 USD = "USD"
 CURRENCY_SYMBOL = {GBP: "£", USD: "$"}
+
 
 # ------------------------
 # Styling
@@ -50,19 +55,34 @@ div[data-testid="stSidebar"] .stDownloadButton button {
     unsafe_allow_html=True,
 )
 
+# Title row with Apply button on the right
+tcol1, tcol2 = st.columns([3.0, 1.2])
+with tcol1:
+    st.title("Stabler Family Finances")
+with tcol2:
+    st.write("")  # spacing
+
+
 # ------------------------
 # Helpers
 # ------------------------
 def utc_now_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
-def local_now_str():
+
+def now_local_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
 
 def current_month_yyyy_mm() -> str:
     return datetime.now().strftime("%Y-%m")
 
+
 def month_options_yyyy_mm() -> list[str]:
+    """
+    Dropdown options: rolling window (current year ± 2 years).
+    Format: YYYY-MM, includes "" as first option.
+    """
     now = datetime.now()
     start_year = now.year - 2
     end_year = now.year + 2
@@ -72,6 +92,7 @@ def month_options_yyyy_mm() -> list[str]:
             opts.append(f"{y:04d}-{m:02d}")
     return opts
 
+
 def cls(x: float) -> str:
     x = float(x)
     if x > 0:
@@ -80,13 +101,97 @@ def cls(x: float) -> str:
         return "neg"
     return "neu"
 
+
 def badge(text: str, kind: str = "neutral"):
     klass = {"ok": "badge-ok", "warn": "badge-warn", "neutral": "badge-neutral"}.get(kind, "badge-neutral")
     st.markdown(f"<span class='badge {klass}'>{text}</span>", unsafe_allow_html=True)
 
+
+# -------- Excel-like + / - parsing (safe) --------
+_ALLOWED_EXPR = re.compile(r"^[0-9\.\+\-\(\)\s]+$")
+
+
+def _safe_eval_add_sub(expr: str) -> float:
+    """
+    Safe eval for expressions containing only numbers, +, -, parentheses, whitespace.
+    """
+    if not _ALLOWED_EXPR.match(expr):
+        raise ValueError("disallowed expression")
+
+    node = ast.parse(expr, mode="eval")
+
+    def _eval(n):
+        if isinstance(n, ast.Expression):
+            return _eval(n.body)
+        if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
+            return float(n.value)
+        if isinstance(n, ast.UnaryOp) and isinstance(n.op, (ast.UAdd, ast.USub)):
+            v = _eval(n.operand)
+            return +v if isinstance(n.op, ast.UAdd) else -v
+        if isinstance(n, ast.BinOp) and isinstance(n.op, (ast.Add, ast.Sub)):
+            left = _eval(n.left)
+            right = _eval(n.right)
+            return left + right if isinstance(n.op, ast.Add) else left - right
+        if isinstance(n, ast.ParenExpr):  # not always present; defensive
+            return _eval(n.expression)
+        raise ValueError("unsupported expression")
+
+    return float(_eval(node))
+
+
+def parse_money(value) -> float:
+    """
+    Accepts numbers or strings like:
+      "£1,234.50", "$8,803.50", "8803.5", "1000-50+12.34"
+    Returns float. Empty/None -> 0.0
+    """
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    s = str(value).strip()
+    if s == "":
+        return 0.0
+
+    # remove currency/symbols/quotes/commas/spaces
+    s = (
+        s.replace("£", "")
+        .replace("$", "")
+        .replace(",", "")
+        .replace("\u00A0", "")
+        .replace("“", "")
+        .replace("”", "")
+        .replace('"', "")
+        .replace("'", "")
+        .strip()
+    )
+
+    # Handle accounting parentheses
+    neg = False
+    if s.startswith("(") and s.endswith(")"):
+        neg = True
+        s = s[1:-1].strip()
+
+    # Try normal float first
+    try:
+        v = float(s)
+        return -v if neg else v
+    except Exception:
+        pass
+
+    # Try expression (add/sub only)
+    try:
+        v = _safe_eval_add_sub(s)
+        return -v if neg else v
+    except Exception:
+        return 0.0
+
+
 def fmt_money(amount: float, currency: str) -> str:
     sym = CURRENCY_SYMBOL.get((currency or GBP).upper(), "")
     return f"{sym}{float(amount):,.2f}"
+
 
 def kpi(label: str, value_gbp: float, force_neutral: bool = False):
     css = "neu" if force_neutral else cls(value_gbp)
@@ -100,111 +205,18 @@ def kpi(label: str, value_gbp: float, force_neutral: bool = False):
         unsafe_allow_html=True,
     )
 
+
 def totals_line(label: str, value_gbp: float):
     st.markdown(
         f"""<div class="totals">{label} <span class="{cls(value_gbp)}">{fmt_money(value_gbp, GBP)}</span></div>""",
         unsafe_allow_html=True,
     )
 
-# ------------------------
-# Money parsing
-# ------------------------
-def parse_money(value) -> float:
-    """Silent parser for saved/loaded values (ZIP/CSV)."""
-    if value is None:
-        return 0.0
-    if isinstance(value, (int, float)):
-        return float(value)
-
-    s = str(value).strip()
-    if s == "":
-        return 0.0
-
-    s = (
-        s.replace("£", "")
-        .replace("$", "")
-        .replace(",", "")
-        .replace(" ", "")
-        .replace("\u00A0", "")
-        .replace("“", "")
-        .replace("”", "")
-        .replace('"', "")
-        .replace("'", "")
-    )
-
-    neg = False
-    if s.startswith("(") and s.endswith(")"):
-        neg = True
-        s = s[1:-1]
-
-    try:
-        v = float(s)
-        return -v if neg else v
-    except Exception:
-        return 0.0
-
-def _parse_plus_minus_expr(value) -> tuple[float, bool]:
-    """Supports + and - only. Returns (value, ok)."""
-    if value is None:
-        return 0.0, True
-    if isinstance(value, (int, float)):
-        return float(value), True
-
-    s = str(value).strip()
-    if s == "":
-        return 0.0, True
-
-    s = (
-        s.replace("£", "")
-        .replace("$", "")
-        .replace(",", "")
-        .replace(" ", "")
-        .replace("\u00A0", "")
-        .replace("“", "")
-        .replace("”", "")
-        .replace('"', "")
-        .replace("'", "")
-        .strip()
-    )
-
-    allowed = set("0123456789+-.")
-    if not set(s).issubset(allowed):
-        return 0.0, False
-    if not any(ch.isdigit() for ch in s):
-        return 0.0, False
-
-    try:
-        total = 0.0
-        current = ""
-        operator = "+"
-
-        for ch in s + "+":
-            if ch in "+-":
-                if current == "":
-                    return 0.0, False
-                num = float(current)
-                total = total + num if operator == "+" else total - num
-                current = ""
-                operator = ch
-            else:
-                current += ch
-
-        return total, True
-    except Exception:
-        return 0.0, False
-
-def parse_money_user(value, context: str, errors: list[str]) -> float:
-    """Parser for user edits. Logs context on invalid values."""
-    num, ok = _parse_plus_minus_expr(value)
-    if not ok:
-        errors.append(context)
-        return 0.0
-    return float(num)
 
 # ------------------------
 # FX feed (provider + 60s cache)
 # ------------------------
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60)  # refresh at most once per minute
 def fetch_usd_to_gbp() -> float:
     r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=8)
     r.raise_for_status()
@@ -215,11 +227,13 @@ def fetch_usd_to_gbp() -> float:
         raise ValueError("GBP rate missing in FX response")
     return float(gbp)
 
+
 def get_usd_to_gbp_rate() -> float:
     try:
         return fetch_usd_to_gbp()
     except Exception:
         return 0.80
+
 
 def to_gbp(amount: float, currency: str, usd_to_gbp: float) -> float:
     cur = (currency or GBP).upper()
@@ -228,6 +242,7 @@ def to_gbp(amount: float, currency: str, usd_to_gbp: float) -> float:
     if cur == USD:
         return float(amount) * float(usd_to_gbp)
     return float(amount)
+
 
 # ------------------------
 # Fixed row templates
@@ -255,17 +270,21 @@ PAY_ROWS = [
     ("Gigi", 6000.0),
 ]
 
+
 # ------------------------
 # Defaults
 # ------------------------
 def defaults_assets():
     return pd.DataFrame([{"Account": a, "Currency": c, "Balance": 0.0} for a, c in ASSET_ROWS])
 
+
 def defaults_cards():
     return pd.DataFrame([{"Card": n, "Currency": c, "Balance": 0.0, "Balance Due": 0.0} for n, c in CARD_ROWS])
 
+
 def defaults_reim():
     return pd.DataFrame([{"Source": s, "Amount": 0.0, "Include?": inc} for s, inc in REIM_ROWS])
+
 
 def defaults_fixed():
     return pd.DataFrame(
@@ -287,11 +306,15 @@ def defaults_fixed():
         ]
     )
 
+
 def defaults_pay():
+    # Unticked included in projection; ticked excluded
     return pd.DataFrame([{"Person": p, "Monthly Pay": amt, "Paid?": False} for p, amt in PAY_ROWS])
+
 
 def defaults_rac_bills():
     return pd.DataFrame(columns=["Purchase", "Amount", "Month"])
+
 
 def default_state():
     return {
@@ -302,8 +325,8 @@ def default_state():
         "pay_cycle": defaults_pay(),
         "rac_bills": defaults_rac_bills(),
         "fx": {"use_live": True, "manual_usd_gbp": 0.80},
-        "snapshot": None,
     }
+
 
 # ------------------------
 # Enforce / Normalize
@@ -319,6 +342,7 @@ def enforce_assets(df: pd.DataFrame) -> pd.DataFrame:
         out.append({"Account": name, "Currency": cur, "Balance": bal})
     return pd.DataFrame(out)
 
+
 def enforce_cards(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     for col in ["Balance", "Balance Due"]:
@@ -331,6 +355,7 @@ def enforce_cards(df: pd.DataFrame) -> pd.DataFrame:
         due = parse_money(m["Balance Due"].iloc[0]) if len(m) else 0.0
         out.append({"Card": name, "Currency": cur, "Balance": bal, "Balance Due": due})
     return pd.DataFrame(out)
+
 
 def enforce_reim(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -346,6 +371,7 @@ def enforce_reim(df: pd.DataFrame) -> pd.DataFrame:
         out.append({"Source": src, "Amount": amt, "Include?": inc})
     return pd.DataFrame(out)
 
+
 def enforce_pay(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "Monthly Pay" not in df.columns:
@@ -359,6 +385,7 @@ def enforce_pay(df: pd.DataFrame) -> pd.DataFrame:
         paid = bool(m["Paid?"].iloc[0]) if len(m) else False
         out.append({"Person": person, "Monthly Pay": pay, "Paid?": paid})
     return pd.DataFrame(out)
+
 
 def normalize_fixed(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -377,6 +404,7 @@ def normalize_fixed(df: pd.DataFrame) -> pd.DataFrame:
     df["Due?"] = df["Due?"].fillna(True).astype(bool)
     return df[["Item", "Amount", "Due?"]]
 
+
 def normalize_rac_bills(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "Purchase" not in df.columns:
@@ -390,6 +418,7 @@ def normalize_rac_bills(df: pd.DataFrame) -> pd.DataFrame:
     df["Amount"] = df["Amount"].apply(parse_money)
     df["Month"] = df["Month"].fillna("").astype(str).str.strip()
     return df[["Purchase", "Amount", "Month"]]
+
 
 # ------------------------
 # ZIP backup / restore
@@ -406,8 +435,8 @@ def state_to_zip_bytes(state: dict) -> bytes:
         z.writestr("pay_cycle.csv", state["pay_cycle"].to_csv(index=False))
         z.writestr("rac_bills.csv", state.get("rac_bills", defaults_rac_bills()).to_csv(index=False))
         z.writestr("fx.json", json.dumps(state.get("fx", {"use_live": True, "manual_usd_gbp": 0.80}), indent=2))
-        z.writestr("snapshot.json", json.dumps(state.get("snapshot", None), indent=2))
     return buf.getvalue()
+
 
 def zip_bytes_to_state(b: bytes) -> dict | None:
     try:
@@ -422,6 +451,7 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
             reim = pd.read_csv(z.open("reimbursements.csv"))
             fixed = pd.read_csv(z.open("fixed_costs.csv"))
             pay = pd.read_csv(z.open("pay_cycle.csv"))
+
             rac = pd.read_csv(z.open("rac_bills.csv")) if "rac_bills.csv" in names else defaults_rac_bills()
 
             fx = {"use_live": True, "manual_usd_gbp": 0.80}
@@ -431,13 +461,6 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
                 except Exception:
                     pass
 
-            snapshot = None
-            if "snapshot.json" in names:
-                try:
-                    snapshot = json.loads(z.read("snapshot.json").decode("utf-8"))
-                except Exception:
-                    snapshot = None
-
             return {
                 "assets": enforce_assets(assets),
                 "credit_cards": enforce_cards(cards),
@@ -446,33 +469,191 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
                 "pay_cycle": enforce_pay(pay),
                 "rac_bills": normalize_rac_bills(rac),
                 "fx": {"use_live": bool(fx.get("use_live", True)), "manual_usd_gbp": float(fx.get("manual_usd_gbp", 0.80))},
-                "snapshot": snapshot,
             }
     except Exception:
         return None
+
+
+# ------------------------
+# Supabase (PostgREST) - no supabase-py required
+# ------------------------
+def _get_supabase_cfg() -> tuple[str | None, str | None]:
+    url = st.secrets.get("SUPABASE_URL", None)
+
+    # Prefer service role for server-side write (keep it in Streamlit secrets only)
+    key = (
+        st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", None)
+        or st.secrets.get("SUPABASE_SERVICE_ROLE", None)
+        or st.secrets.get("SUPABASE_KEY", None)
+        or st.secrets.get("SUPABASE_ANON_KEY", None)
+    )
+    return url, key
+
+
+def supabase_enabled() -> bool:
+    url, key = _get_supabase_cfg()
+    return bool(url) and bool(key)
+
+
+def supabase_headers() -> dict:
+    url, key = _get_supabase_cfg()
+    # key is used as apikey + bearer token (PostgREST accepts both)
+    return {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+
+
+def supabase_read_app_state() -> tuple[dict | None, str | None]:
+    """
+    Returns (row, error). row includes state_json + schema_version + updated_at if present.
+    """
+    url, key = _get_supabase_cfg()
+    if not url or not key:
+        return None, "Supabase secrets missing."
+
+    endpoint = f"{url}/rest/v1/app_state"
+    params = {"id": f"eq.{APP_STATE_ID}", "select": "id,state_json,schema_version,updated_at"}
+
+    try:
+        r = requests.get(endpoint, headers=supabase_headers(), params=params, timeout=10)
+        if r.status_code >= 400:
+            return None, f"Supabase read failed ({r.status_code})."
+        rows = r.json()
+        if not rows:
+            return None, None
+        return rows[0], None
+    except Exception as e:
+        return None, str(e)
+
+
+def supabase_upsert_app_state(state: dict) -> tuple[bool, str | None, str | None]:
+    """
+    Upserts app_state row. Returns (ok, updated_at, error).
+    """
+    url, key = _get_supabase_cfg()
+    if not url or not key:
+        return False, None, "Supabase secrets missing."
+
+    endpoint = f"{url}/rest/v1/app_state"
+    updated_at = utc_now_iso()
+
+    payload = [
+        {
+            "id": APP_STATE_ID,
+            "state_json": state_to_json_for_db(state),
+            "schema_version": SCHEMA_VERSION,
+            "updated_at": updated_at,
+        }
+    ]
+
+    headers = supabase_headers()
+    # upsert behavior
+    headers["Prefer"] = "resolution=merge-duplicates,return=representation"
+
+    try:
+        r = requests.post(endpoint, headers=headers, json=payload, timeout=12)
+        if r.status_code >= 400:
+            return False, None, f"Supabase write failed ({r.status_code})."
+        return True, updated_at, None
+    except Exception as e:
+        return False, None, str(e)
+
+
+def state_to_json_for_db(state: dict) -> dict:
+    """
+    Convert dataframe state to JSON-friendly dict.
+    """
+    def df_to_records(df: pd.DataFrame) -> list[dict]:
+        return json.loads(df.to_json(orient="records"))
+
+    return {
+        "assets": df_to_records(state["assets"]),
+        "credit_cards": df_to_records(state["credit_cards"]),
+        "reimbursements": df_to_records(state["reimbursements"]),
+        "fixed_costs": df_to_records(state["fixed_costs"]),
+        "pay_cycle": df_to_records(state["pay_cycle"]),
+        "rac_bills": df_to_records(state.get("rac_bills", defaults_rac_bills())),
+        "fx": state.get("fx", {"use_live": True, "manual_usd_gbp": 0.80}),
+    }
+
+
+def json_to_state_from_db(d: dict) -> dict:
+    """
+    Convert DB JSON into enforced state.
+    """
+    # Start with defaults so missing keys don’t break
+    base = default_state()
+
+    try:
+        if isinstance(d, str):
+            d = json.loads(d)
+
+        assets = pd.DataFrame(d.get("assets", []))
+        cards = pd.DataFrame(d.get("credit_cards", []))
+        reim = pd.DataFrame(d.get("reimbursements", []))
+        fixed = pd.DataFrame(d.get("fixed_costs", []))
+        pay = pd.DataFrame(d.get("pay_cycle", []))
+        rac = pd.DataFrame(d.get("rac_bills", []))
+        fx = d.get("fx", base["fx"])
+
+        return {
+            "assets": enforce_assets(assets if len(assets) else base["assets"]),
+            "credit_cards": enforce_cards(cards if len(cards) else base["credit_cards"]),
+            "reimbursements": enforce_reim(reim if len(reim) else base["reimbursements"]),
+            "fixed_costs": normalize_fixed(fixed if len(fixed) else base["fixed_costs"]),
+            "pay_cycle": enforce_pay(pay if len(pay) else base["pay_cycle"]),
+            "rac_bills": normalize_rac_bills(rac if len(rac) else base["rac_bills"]),
+            "fx": {
+                "use_live": bool(fx.get("use_live", True)),
+                "manual_usd_gbp": float(fx.get("manual_usd_gbp", 0.80)),
+            },
+        }
+    except Exception:
+        return base
+
 
 # ------------------------
 # Session init
 # ------------------------
 if "app_state" not in st.session_state:
     st.session_state.app_state = default_state()
+
 if "pending_zip_bytes" not in st.session_state:
     st.session_state.pending_zip_bytes = None
+
 if "fx_last_refresh_local" not in st.session_state:
     st.session_state.fx_last_refresh_local = None
-if "last_apply_errors" not in st.session_state:
-    st.session_state.last_apply_errors = []
-if "last_apply_local" not in st.session_state:
-    st.session_state.last_apply_local = None
-if "do_snapshot" not in st.session_state:
-    st.session_state.do_snapshot = False
+
+if "last_applied_local" not in st.session_state:
+    st.session_state.last_applied_local = None
+
+if "supabase_loaded" not in st.session_state:
+    st.session_state.supabase_loaded = False
+
+if "supabase_last_saved_utc" not in st.session_state:
+    st.session_state.supabase_last_saved_utc = None
+
 
 # ------------------------
-# Sidebar: Save / Load + Snapshot
+# Auto-load from Supabase once per session
+# ------------------------
+if supabase_enabled() and not st.session_state.supabase_loaded:
+    row, err = supabase_read_app_state()
+    if err is None and row is not None:
+        st.session_state.app_state = json_to_state_from_db(row.get("state_json", {}))
+        st.session_state.supabase_last_saved_utc = row.get("updated_at", None)
+    st.session_state.supabase_loaded = True
+
+
+# ------------------------
+# Sidebar: Save / Load
 # ------------------------
 with st.sidebar:
     st.subheader("Save / Load")
 
+    # ZIP download
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     zip_bytes = state_to_zip_bytes(st.session_state.app_state)
 
@@ -484,6 +665,7 @@ with st.sidebar:
         use_container_width=True,
     )
 
+    # ZIP upload (staged)
     up = st.file_uploader("Restore from backup (ZIP)", type=["zip"])
     if up is not None:
         st.session_state.pending_zip_bytes = up.read()
@@ -502,48 +684,42 @@ with st.sidebar:
             else:
                 st.session_state.app_state = restored
                 st.session_state.pending_zip_bytes = None
+                st.session_state.last_applied_local = now_local_str()
+                st.success("Backup restored.")
                 st.rerun()
-
-    st.divider()
-    st.subheader("Snapshot")
-
-    snapshot = st.session_state.app_state.get("snapshot", None)
-    if not isinstance(snapshot, dict):
-        badge("No snapshot saved yet", "neutral")
-    else:
-        badge("Snapshot saved", "ok")
-        st.caption(f"Saved: {snapshot.get('saved_at_local')}")
-        try:
-            st.caption(f"Net Cash at snapshot: {fmt_money(float(snapshot.get('net_cash_gbp', 0.0)), GBP)}")
-        except Exception:
-            pass
-
-    if st.button("📸 Save snapshot (Net Cash)", use_container_width=True):
-        st.session_state.do_snapshot = True
-        st.rerun()
-
-    if st.button("🧹 Clear snapshot", use_container_width=True):
-        st.session_state.app_state["snapshot"] = None
-        st.rerun()
 
     st.write("")
     if st.button("Reset to defaults", use_container_width=True):
         st.session_state.app_state = default_state()
         st.session_state.pending_zip_bytes = None
+        st.session_state.last_applied_local = now_local_str()
         st.rerun()
 
-# ------------------------
-# Header row: Title + Apply button top-right
-# ------------------------
-h1, h2 = st.columns([4.5, 1.5], vertical_alignment="center")
-with h1:
-    st.title("Stabler Family Finances")
-with h2:
-    apply_placeholder = st.empty()
-    apply_ts_placeholder = st.empty()
+    st.divider()
+    st.subheader("Cloud Store (Supabase)")
+
+    if supabase_enabled():
+        badge("Connected", "ok")
+        if st.session_state.supabase_last_saved_utc:
+            st.caption(f"Last saved (Supabase UTC): {st.session_state.supabase_last_saved_utc}")
+        if st.button("↻ Reload from Supabase now", use_container_width=True):
+            row, err = supabase_read_app_state()
+            if err:
+                st.error(err)
+            elif row is None:
+                st.warning("No row found in app_state yet.")
+            else:
+                st.session_state.app_state = json_to_state_from_db(row.get("state_json", {}))
+                st.session_state.supabase_last_saved_utc = row.get("updated_at", None)
+                st.session_state.last_applied_local = now_local_str()
+                st.rerun()
+    else:
+        badge("Not configured", "warn")
+        st.caption("Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Streamlit Secrets.")
+
 
 # ------------------------
-# Pull current FX and load tables from stored state
+# FX
 # ------------------------
 state = st.session_state.app_state
 fx_cfg = state.get("fx", {"use_live": True, "manual_usd_gbp": 0.80})
@@ -551,6 +727,10 @@ fx_cfg = state.get("fx", {"use_live": True, "manual_usd_gbp": 0.80})
 usd_to_gbp_live = get_usd_to_gbp_rate()
 usd_to_gbp = usd_to_gbp_live if fx_cfg.get("use_live", True) else float(fx_cfg.get("manual_usd_gbp", 0.80))
 
+
+# ------------------------
+# Load tables
+# ------------------------
 assets_df = state["assets"].copy()
 cards_df = state["credit_cards"].copy()
 reim_df = state["reimbursements"].copy()
@@ -558,21 +738,290 @@ fixed_df = normalize_fixed(state["fixed_costs"].copy())
 pay_df = state["pay_cycle"].copy()
 rac_df = normalize_rac_bills(state.get("rac_bills", defaults_rac_bills()).copy())
 
+
 # ------------------------
-# RAC (current month liability)
+# Editors (NO apply buttons here; we use one main Apply All)
 # ------------------------
+# Row 1
+a, b, c = st.columns([1.2, 1.1, 1.1])
+
+with a:
+    st.subheader("Assets")
+    assets_edit = assets_df.copy()
+    assets_edit["Balance"] = assets_edit.apply(lambda r: fmt_money(parse_money(r["Balance"]), r["Currency"]), axis=1)
+
+    edited_assets = st.data_editor(
+        assets_edit[["Account", "Currency", "Balance"]],
+        hide_index=True,
+        num_rows="fixed",
+        use_container_width=True,
+        column_config={
+            "Account": st.column_config.TextColumn("Account", disabled=True),
+            "Currency": st.column_config.TextColumn("Currency", disabled=True),
+            "Balance": st.column_config.TextColumn("Balance"),
+        },
+        key="assets_editor",
+    )
+
+with b:
+    st.subheader("Credit Cards")
+    cards_edit = cards_df.copy()
+    cards_edit["Balance"] = cards_edit.apply(lambda r: fmt_money(parse_money(r["Balance"]), r["Currency"]), axis=1)
+    cards_edit["Balance Due"] = cards_edit.apply(lambda r: fmt_money(parse_money(r["Balance Due"]), r["Currency"]), axis=1)
+
+    edited_cards = st.data_editor(
+        cards_edit[["Card", "Balance", "Balance Due"]],
+        hide_index=True,
+        num_rows="fixed",
+        use_container_width=True,
+        column_config={
+            "Card": st.column_config.TextColumn("Card", disabled=True),
+            "Balance": st.column_config.TextColumn("Balance"),
+            "Balance Due": st.column_config.TextColumn("Balance Due"),
+        },
+        key="cards_editor",
+    )
+
+with c:
+    st.subheader("Reimbursement Pending")
+    st.caption("Always included in Net Cash. Use Include? only for Ability to repay.")
+
+    reim_edit = reim_df.copy()
+    reim_edit["Amount"] = reim_edit["Amount"].apply(lambda v: fmt_money(parse_money(v), GBP))
+
+    edited_reim = st.data_editor(
+        reim_edit[["Source", "Amount", "Include?"]],
+        hide_index=True,
+        num_rows="fixed",
+        use_container_width=True,
+        column_config={
+            "Source": st.column_config.TextColumn("Source", disabled=True),
+            "Amount": st.column_config.TextColumn("Amount"),
+            "Include?": st.column_config.CheckboxColumn("Include?"),
+        },
+        key="reim_editor",
+    )
+
+# Divider
+st.divider()
+
+# Row 2
+d, e = st.columns([2.1, 1.0])
+
+with d:
+    st.subheader("Monthly Fixed")
+    fixed_edit = fixed_df.copy()
+    fixed_edit["Amount"] = fixed_edit["Amount"].apply(lambda v: fmt_money(parse_money(v), GBP))
+
+    edited_fixed = st.data_editor(
+        fixed_edit[["Item", "Amount", "Due?"]],
+        hide_index=True,
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "Item": st.column_config.TextColumn("Item"),
+            "Amount": st.column_config.TextColumn("Amount"),
+            "Due?": st.column_config.CheckboxColumn("Due?"),
+        },
+        key="fixed_editor",
+    )
+
+with e:
+    st.subheader("RAC monthly bill")
+
+    rac_edit = rac_df.copy()
+    rac_edit["Amount"] = rac_edit["Amount"].apply(lambda v: fmt_money(parse_money(v), GBP))
+
+    edited_rac = st.data_editor(
+        rac_edit[["Purchase", "Amount", "Month"]],
+        hide_index=True,
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "Purchase": st.column_config.TextColumn("Purchase"),
+            "Amount": st.column_config.TextColumn("Amount"),
+            "Month": st.column_config.SelectboxColumn("Month", options=month_options_yyyy_mm()),
+        },
+        key="rac_editor",
+    )
+
+    st.write("")
+    st.subheader("Monthly Pay")
+    st.caption("Unticked salaries are included in projection. Tick Paid? once received to exclude from projection.")
+
+    pay_edit = pay_df.copy()
+    pay_edit["Monthly Pay"] = pay_edit["Monthly Pay"].apply(lambda v: fmt_money(parse_money(v), GBP))
+
+    edited_pay = st.data_editor(
+        pay_edit[["Person", "Monthly Pay", "Paid?"]],
+        hide_index=True,
+        num_rows="fixed",
+        use_container_width=True,
+        column_config={
+            "Person": st.column_config.TextColumn("Person", disabled=True),
+            "Monthly Pay": st.column_config.TextColumn("Monthly Pay"),
+            "Paid?": st.column_config.CheckboxColumn("Paid?"),
+        },
+        key="pay_editor",
+    )
+
+st.divider()
+
+# ------------------------
+# FX bottom (refresh button + timestamp)
+# ------------------------
+st.subheader("FX (USD → GBP)")
+st.caption("Used only for converting USD balances (Apple Savings / Apple Card) into GBP totals.")
+
+fxl, fxr = st.columns([1.2, 1.0])
+
+with fxl:
+    st.markdown(
+        f"""<div class="totals">Live USD→GBP (cached): <span class="neu">{usd_to_gbp_live:.4f}</span></div>""",
+        unsafe_allow_html=True,
+    )
+
+    if st.session_state.fx_last_refresh_local is not None:
+        st.caption(f"Last refreshed (local): {st.session_state.fx_last_refresh_local}")
+
+    if st.button("🔄 Pull current rate", use_container_width=True):
+        fetch_usd_to_gbp.clear()
+        st.session_state.fx_last_refresh_local = now_local_str()
+        st.rerun()
+
+with fxr:
+    use_live = st.toggle("Use live FX", value=bool(fx_cfg.get("use_live", True)))
+    manual = st.number_input("Manual USD→GBP", value=float(fx_cfg.get("manual_usd_gbp", 0.80)), step=0.0001, format="%.4f")
+
+
+# ------------------------
+# Apply All Changes (updates session state + saves to Supabase)
+# ------------------------
+def apply_all_changes() -> tuple[dict, list[str]]:
+    """
+    Reads edited_* dataframes, normalizes/enforces into clean state dict.
+    Returns (new_state, warnings)
+    """
+    warns: list[str] = []
+
+    # Assets
+    new_assets = assets_df.copy()
+    if "Balance" in edited_assets.columns:
+        new_assets["Balance"] = edited_assets["Balance"].apply(parse_money)
+    new_assets = enforce_assets(new_assets)
+
+    # Cards
+    new_cards = cards_df.copy()
+    if "Balance" in edited_cards.columns:
+        new_cards["Balance"] = edited_cards["Balance"].apply(parse_money)
+    if "Balance Due" in edited_cards.columns:
+        new_cards["Balance Due"] = edited_cards["Balance Due"].apply(parse_money)
+    new_cards = enforce_cards(new_cards)
+
+    # Reimbursements
+    new_reim = reim_df.copy()
+    if "Amount" in edited_reim.columns:
+        new_reim["Amount"] = edited_reim["Amount"].apply(parse_money)
+    if "Include?" in edited_reim.columns:
+        new_reim["Include?"] = edited_reim["Include?"].fillna(False).astype(bool)
+    new_reim = enforce_reim(new_reim)
+
+    # Fixed
+    new_fixed = edited_fixed.copy()
+    if "Amount" in new_fixed.columns:
+        new_fixed["Amount"] = new_fixed["Amount"].apply(parse_money)
+    if "Due?" in new_fixed.columns:
+        new_fixed["Due?"] = new_fixed["Due?"].fillna(True).astype(bool)
+    new_fixed = normalize_fixed(new_fixed)
+
+    # RAC
+    new_rac = edited_rac.copy()
+    if "Amount" in new_rac.columns:
+        new_rac["Amount"] = new_rac["Amount"].apply(parse_money)
+
+    default_m = current_month_yyyy_mm()
+    new_rac["Month"] = new_rac.get("Month", "").fillna("").astype(str).str.strip()
+    new_rac.loc[new_rac["Month"] == "", "Month"] = default_m
+    new_rac = normalize_rac_bills(new_rac)
+
+    # Pay
+    new_pay = pay_df.copy()
+    if "Monthly Pay" in edited_pay.columns:
+        new_pay["Monthly Pay"] = edited_pay["Monthly Pay"].apply(parse_money)
+    if "Paid?" in edited_pay.columns:
+        new_pay["Paid?"] = edited_pay["Paid?"].fillna(False).astype(bool)
+    new_pay = enforce_pay(new_pay)
+
+    # FX settings
+    new_fx = {"use_live": bool(use_live), "manual_usd_gbp": float(manual)}
+
+    new_state = {
+        "assets": new_assets,
+        "credit_cards": new_cards,
+        "reimbursements": new_reim,
+        "fixed_costs": new_fixed,
+        "pay_cycle": new_pay,
+        "rac_bills": new_rac,
+        "fx": new_fx,
+    }
+
+    return new_state, warns
+
+
+# Button on title row (right)
+with tcol2:
+    applied = st.button("✅ Apply all changes", use_container_width=True)
+
+# If clicked, apply and autosave to Supabase
+if applied:
+    new_state, warnings = apply_all_changes()
+    st.session_state.app_state = new_state
+    st.session_state.last_applied_local = now_local_str()
+
+    # Autosave to Supabase (if configured)
+    if supabase_enabled():
+        ok, updated_at, err = supabase_upsert_app_state(new_state)
+        if ok:
+            st.session_state.supabase_last_saved_utc = updated_at
+        else:
+            # don’t block app usage; just show error
+            st.error(f"Supabase save failed: {err}")
+    else:
+        st.warning("Supabase not configured — saved only in session. (ZIP backups still work.)")
+
+    st.rerun()
+
+# Timestamp under the button area
+if st.session_state.last_applied_local:
+    st.caption(f"Last applied (local): {st.session_state.last_applied_local}")
+
+
+# ------------------------
+# Calculations (based on current state)
+# ------------------------
+state = st.session_state.app_state
+assets_df = state["assets"].copy()
+cards_df = state["credit_cards"].copy()
+reim_df = state["reimbursements"].copy()
+fixed_df = normalize_fixed(state["fixed_costs"].copy())
+pay_df = state["pay_cycle"].copy()
+rac_df = normalize_rac_bills(state.get("rac_bills", defaults_rac_bills()).copy())
+fx_cfg = state.get("fx", {"use_live": True, "manual_usd_gbp": 0.80})
+
+usd_to_gbp_live = get_usd_to_gbp_rate()
+usd_to_gbp = usd_to_gbp_live if fx_cfg.get("use_live", True) else float(fx_cfg.get("manual_usd_gbp", 0.80))
+
 THIS_MONTH = current_month_yyyy_mm()
 rac_df["Month"] = rac_df["Month"].fillna("").astype(str).str.strip()
 rac_due_this_month_gbp = float(rac_df.loc[rac_df["Month"] == THIS_MONTH, "Amount"].apply(parse_money).sum())
 
-# ------------------------
-# Calculations (based on STORED values)
-# ------------------------
 assets_total_gbp = float(sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in assets_df.iterrows()))
 cards_balance_total_gbp = float(sum(to_gbp(parse_money(r["Balance"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows()))
 cards_due_total_gbp = float(sum(to_gbp(parse_money(r["Balance Due"]), r["Currency"], usd_to_gbp) for _, r in cards_df.iterrows()))
 
+# reimbursements ALWAYS in net cash
 reim_all_gbp = float(reim_df["Amount"].apply(parse_money).sum())
+# checkbox only for ability-to-repay
 reim_included_for_repay_gbp = float(reim_df.loc[reim_df["Include?"] == True, "Amount"].apply(parse_money).sum())  # noqa: E712
 
 fixed_due_gbp = float(fixed_df.loc[fixed_df["Due?"] == True, "Amount"].sum())  # noqa: E712
@@ -584,29 +1033,11 @@ remaining_spending_gbp = net_cash_gbp + (pay_included_gbp - fixed_due_gbp)
 ability_surplus_gbp = (assets_total_gbp + reim_included_for_repay_gbp) - cards_due_total_gbp
 ability_to_repay = ability_surplus_gbp >= 0
 
-# Snapshot requested this run
-if st.session_state.do_snapshot:
-    st.session_state.app_state["snapshot"] = {
-        "saved_at_local": local_now_str(),
-        "saved_at_utc": utc_now_iso(),
-        "net_cash_gbp": float(net_cash_gbp),
-    }
-    st.session_state.do_snapshot = False
-    st.rerun()
-
-# ------------------------
-# Show invalid-input warnings (if any)
-# ------------------------
-if st.session_state.last_apply_errors:
-    st.warning(
-        "Some values were invalid and were saved as £0.00:\n- " + "\n- ".join(st.session_state.last_apply_errors)
-    )
-    st.session_state.last_apply_errors = []
-
 # ------------------------
 # KPIs
 # ------------------------
 k1, k2, k3 = st.columns(3)
+
 with k1:
     kpi("Net Cash (GBP)", net_cash_gbp)
 
@@ -635,88 +1066,13 @@ with k2:
 with k3:
     kpi("Remaining spending this month (GBP)", remaining_spending_gbp)
 
-# ------------------------
-# Snapshot delta line (original simple style)
-# ------------------------
-snapshot = state.get("snapshot", None)
-snapshot_net_cash = None
-snapshot_time = None
-spent_since_snapshot_gbp = None
-delta_since_snapshot_gbp = None
-
-if isinstance(snapshot, dict):
-    snapshot_net_cash = snapshot.get("net_cash_gbp", None)
-    snapshot_time = snapshot.get("saved_at_local", None)
-    try:
-        if snapshot_net_cash is not None:
-            snapshot_net_cash = float(snapshot_net_cash)
-            delta_since_snapshot_gbp = float(net_cash_gbp - snapshot_net_cash)
-            spent_since_snapshot_gbp = float(snapshot_net_cash - net_cash_gbp)
-    except Exception:
-        snapshot_net_cash = None
-        snapshot_time = None
-        spent_since_snapshot_gbp = None
-        delta_since_snapshot_gbp = None
-
-if snapshot_net_cash is not None and spent_since_snapshot_gbp is not None and delta_since_snapshot_gbp is not None:
-    st.markdown(
-        f"""
-<div class="totals">
-  Since snapshot ({snapshot_time}):
-  Change in Net Cash: <span class="{cls(delta_since_snapshot_gbp)}">{fmt_money(delta_since_snapshot_gbp, GBP)}</span>
-  &nbsp;&nbsp;•&nbsp;&nbsp;
-  Spent Since Snapshot (GBP): <span class="{cls(-spent_since_snapshot_gbp)}">{fmt_money(-spent_since_snapshot_gbp, GBP)}</span>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
 st.divider()
 
-# ------------------------
-# Editors
-# ------------------------
-a, b, c = st.columns([1.2, 1.1, 1.1])
-
-with a:
-    st.subheader("Assets")
-    assets_edit = assets_df.copy()
-    assets_edit["Balance"] = assets_edit.apply(lambda r: fmt_money(parse_money(r["Balance"]), r["Currency"]), axis=1)
-
-    edited_assets = st.data_editor(
-        assets_edit[["Account", "Currency", "Balance"]],
-        hide_index=True,
-        num_rows="fixed",
-        use_container_width=True,
-        column_config={
-            "Account": st.column_config.TextColumn("Account", disabled=True),
-            "Currency": st.column_config.TextColumn("Currency", disabled=True),
-            "Balance": st.column_config.TextColumn("Balance"),
-        },
-        key="assets_editor",
-    )
-
+# Totals under each section (as you like)
+aa, bb, cc = st.columns([1.2, 1.1, 1.1])
+with aa:
     totals_line("Total Assets (GBP):", assets_total_gbp)
-
-with b:
-    st.subheader("Credit Cards")
-    cards_edit = cards_df.copy()
-    cards_edit["Balance"] = cards_edit.apply(lambda r: fmt_money(parse_money(r["Balance"]), r["Currency"]), axis=1)
-    cards_edit["Balance Due"] = cards_edit.apply(lambda r: fmt_money(parse_money(r["Balance Due"]), r["Currency"]), axis=1)
-
-    edited_cards = st.data_editor(
-        cards_edit[["Card", "Balance", "Balance Due"]],
-        hide_index=True,
-        num_rows="fixed",
-        use_container_width=True,
-        column_config={
-            "Card": st.column_config.TextColumn("Card", disabled=True),
-            "Balance": st.column_config.TextColumn("Balance"),
-            "Balance Due": st.column_config.TextColumn("Balance Due"),
-        },
-        key="cards_editor",
-    )
-
+with bb:
     st.markdown(
         f"""
 <div class="totals">
@@ -727,52 +1083,14 @@ with b:
 """,
         unsafe_allow_html=True,
     )
-
-with c:
-    st.subheader("Reimbursement Pending")
-    st.caption("Always included in Net Cash. Use Include? only for Ability to repay.")
-
-    reim_edit = reim_df.copy()
-    reim_edit["Amount"] = reim_edit["Amount"].apply(lambda v: fmt_money(parse_money(v), GBP))
-
-    edited_reim = st.data_editor(
-        reim_edit[["Source", "Amount", "Include?"]],
-        hide_index=True,
-        num_rows="fixed",
-        use_container_width=True,
-        column_config={
-            "Source": st.column_config.TextColumn("Source", disabled=True),
-            "Amount": st.column_config.TextColumn("Amount"),
-            "Include?": st.column_config.CheckboxColumn("Include?"),
-        },
-        key="reim_editor",
-    )
-
+with cc:
     totals_line("Total Reimbursements (GBP):", reim_all_gbp)
     totals_line("Included for Ability to repay (GBP):", reim_included_for_repay_gbp)
 
 st.divider()
 
-d, e = st.columns([2.1, 1.0])
-
-with d:
-    st.subheader("Monthly Fixed")
-    fixed_edit = fixed_df.copy()
-    fixed_edit["Amount"] = fixed_edit["Amount"].apply(lambda v: fmt_money(parse_money(v), GBP))
-
-    edited_fixed = st.data_editor(
-        fixed_edit[["Item", "Amount", "Due?"]],
-        hide_index=True,
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "Item": st.column_config.TextColumn("Item"),
-            "Amount": st.column_config.TextColumn("Amount"),
-            "Due?": st.column_config.CheckboxColumn("Due?"),
-        },
-        key="fixed_editor",
-    )
-
+dd, ee = st.columns([2.1, 1.0])
+with dd:
     st.markdown(
         f"""
 <div class="totals">
@@ -781,158 +1099,6 @@ with d:
 """,
         unsafe_allow_html=True,
     )
-
-with e:
-    st.subheader("RAC monthly bill")
-    rac_edit = rac_df.copy()
-    rac_edit["Amount"] = rac_edit["Amount"].apply(lambda v: fmt_money(parse_money(v), GBP))
-
-    edited_rac = st.data_editor(
-        rac_edit[["Purchase", "Amount", "Month"]],
-        hide_index=True,
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "Purchase": st.column_config.TextColumn("Purchase"),
-            "Amount": st.column_config.TextColumn("Amount"),
-            "Month": st.column_config.SelectboxColumn("Month", options=month_options_yyyy_mm()),
-        },
-        key="rac_editor",
-    )
-
+with ee:
     totals_line(f"RAC due this month ({THIS_MONTH}):", rac_due_this_month_gbp)
-
-    st.write("")
-    st.subheader("Monthly Pay")
-    st.caption("Unticked salaries are included in projection. Tick Paid? once received to exclude from projection.")
-
-    pay_edit = pay_df.copy()
-    pay_edit["Monthly Pay"] = pay_edit["Monthly Pay"].apply(lambda v: fmt_money(parse_money(v), GBP))
-
-    edited_pay = st.data_editor(
-        pay_edit[["Person", "Monthly Pay", "Paid?"]],
-        hide_index=True,
-        num_rows="fixed",
-        use_container_width=True,
-        column_config={
-            "Person": st.column_config.TextColumn("Person", disabled=True),
-            "Monthly Pay": st.column_config.TextColumn("Monthly Pay"),
-            "Paid?": st.column_config.CheckboxColumn("Paid?"),
-        },
-        key="pay_editor",
-    )
-
     totals_line("Total Pay Included (Unticked):", pay_included_gbp)
-
-st.divider()
-
-# ------------------------
-# FX bottom (applied via main Apply)
-# ------------------------
-st.subheader("FX (USD → GBP)")
-st.caption("Used only for converting USD balances (Apple Savings / Apple Card) into GBP totals.")
-
-fxl, fxr = st.columns([1.2, 1.0])
-
-with fxl:
-    st.markdown(
-        f"""<div class="totals">Live USD→GBP (cached): <span class="neu">{usd_to_gbp_live:.4f}</span></div>""",
-        unsafe_allow_html=True,
-    )
-    if st.session_state.fx_last_refresh_local is not None:
-        st.caption(f"Last refreshed: {st.session_state.fx_last_refresh_local}")
-
-    if st.button("🔄 Pull current rate", use_container_width=True):
-        fetch_usd_to_gbp.clear()
-        st.session_state.fx_last_refresh_local = local_now_str()
-        st.rerun()
-
-with fxr:
-    use_live = st.toggle("Use live FX", value=bool(fx_cfg.get("use_live", True)), key="fx_use_live")
-    manual = st.number_input(
-        "Manual USD→GBP",
-        value=float(fx_cfg.get("manual_usd_gbp", 0.80)),
-        step=0.0001,
-        format="%.4f",
-        key="fx_manual",
-    )
-
-# ------------------------
-# Main Apply button (top-right) + timestamp under it
-# ------------------------
-apply_clicked = apply_placeholder.button("✅ Apply all changes", use_container_width=True)
-
-if st.session_state.last_apply_local:
-    apply_ts_placeholder.caption(f"Last applied: {st.session_state.last_apply_local}")
-else:
-    apply_ts_placeholder.caption("Last applied: —")
-
-if apply_clicked:
-    errors: list[str] = []
-
-    # Assets
-    new_assets = assets_df.copy()
-    new_assets["Balance"] = [
-        parse_money_user(v, f"Assets → {acc} (Balance)", errors)
-        for acc, v in zip(assets_df["Account"], edited_assets["Balance"])
-    ]
-    st.session_state.app_state["assets"] = enforce_assets(new_assets)
-
-    # Cards
-    new_cards = cards_df.copy()
-    new_cards["Balance"] = [
-        parse_money_user(v, f"Credit Cards → {card} (Balance)", errors)
-        for card, v in zip(cards_df["Card"], edited_cards["Balance"])
-    ]
-    new_cards["Balance Due"] = [
-        parse_money_user(v, f"Credit Cards → {card} (Balance Due)", errors)
-        for card, v in zip(cards_df["Card"], edited_cards["Balance Due"])
-    ]
-    st.session_state.app_state["credit_cards"] = enforce_cards(new_cards)
-
-    # Reimbursements
-    new_reim = reim_df.copy()
-    new_reim["Amount"] = [
-        parse_money_user(v, f"Reimbursements → {src} (Amount)", errors)
-        for src, v in zip(reim_df["Source"], edited_reim["Amount"])
-    ]
-    new_reim["Include?"] = edited_reim["Include?"].fillna(False).astype(bool)
-    st.session_state.app_state["reimbursements"] = enforce_reim(new_reim)
-
-    # Fixed
-    new_fixed = edited_fixed.copy()
-    new_fixed["Amount"] = [
-        parse_money_user(v, f"Monthly Fixed → {item} (Amount)", errors)
-        for item, v in zip(new_fixed["Item"].astype(str), new_fixed["Amount"])
-    ]
-    new_fixed["Due?"] = new_fixed["Due?"].fillna(True).astype(bool)
-    st.session_state.app_state["fixed_costs"] = normalize_fixed(new_fixed)
-
-    # RAC
-    new_rac = edited_rac.copy()
-    new_rac["Amount"] = [
-        parse_money_user(v, f"RAC → {pur} (Amount)", errors)
-        for pur, v in zip(new_rac["Purchase"].astype(str), new_rac["Amount"])
-    ]
-    default_m = current_month_yyyy_mm()
-    new_rac["Month"] = new_rac["Month"].fillna("").astype(str).str.strip()
-    new_rac.loc[new_rac["Month"] == "", "Month"] = default_m
-    st.session_state.app_state["rac_bills"] = normalize_rac_bills(new_rac)
-
-    # Pay
-    new_pay = pay_df.copy()
-    new_pay["Monthly Pay"] = [
-        parse_money_user(v, f"Monthly Pay → {p} (Monthly Pay)", errors)
-        for p, v in zip(pay_df["Person"], edited_pay["Monthly Pay"])
-    ]
-    new_pay["Paid?"] = edited_pay["Paid?"].fillna(False).astype(bool)
-    st.session_state.app_state["pay_cycle"] = enforce_pay(new_pay)
-
-    # FX settings
-    st.session_state.app_state["fx"] = {"use_live": bool(use_live), "manual_usd_gbp": float(manual)}
-
-    # Store warnings + timestamp
-    st.session_state.last_apply_errors = errors
-    st.session_state.last_apply_local = local_now_str()
-
-    st.rerun()
