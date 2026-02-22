@@ -6,7 +6,12 @@ from datetime import datetime, timezone
 import pandas as pd
 import requests
 import streamlit as st
-from supabase import create_client
+try:
+    from supabase import create_client  # pip package: supabase
+    SUPABASE_AVAILABLE = True
+except Exception:
+    create_client = None
+    SUPABASE_AVAILABLE = False
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 
@@ -434,7 +439,7 @@ def zip_bytes_to_state(b: bytes) -> dict | None:
 # Supabase state store (optional)
 # ------------------------
 def supabase_is_configured() -> bool:
-    return bool(st.secrets.get("SUPABASE_URL")) and bool(
+    return SUPABASE_AVAILABLE and bool(st.secrets.get("SUPABASE_URL")) and bool(
         st.secrets.get("SUPABASE_ANON_KEY") or st.secrets.get("SUPABASE_KEY")
     )
 
