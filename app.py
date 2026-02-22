@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 import pandas as pd
 import requests
 import streamlit as st
-from supabase import create_client
 
 st.set_page_config(page_title="Stabler Family Finances", layout="wide")
 
@@ -430,78 +429,6 @@ if "pending_zip_bytes" not in st.session_state:
 if "fx_last_refresh_local" not in st.session_state:
     st.session_state.fx_last_refresh_local = None
 
-# ------------------------
-# Supabase state store (optional)
-# ------------------------
-def supabase_is_configured() -> bool:
-    return bool(st.secrets.get("SUPABASE_URL")) and bool(
-        st.secrets.get("SUPABASE_ANON_KEY") or st.secrets.get("SUPABASE_KEY")
-    )
-
-def get_supabase_client():
-    url = st.secrets.get("SUPABASE_URL")
-    key = st.secrets.get("SUPABASE_ANON_KEY") or st.secrets.get("SUPABASE_KEY")
-    return create_client(url, key)
-
-def load_state_from_supabase() -> dict | None:
-    """
-    Reads one row from public.app_state where id='stabler'
-    Expects columns: id (text PK), state_json (jsonb), schema_version (text), updated_at (timestamptz)
-    """
-    if not supabase_is_configured():
-        return None
-    try:
-        sb = get_supabase_client()
-        res = sb.table("app_state").select("state_json").eq("id", "stabler").limit(1).execute()
-        data = getattr(res, "data", None) or []
-        if not data:
-            return None
-        raw = data[0].get("state_json", None)
-        if raw is None:
-            return None
-
-        # raw should be dict (jsonb). Normalize/enforce.
-        state = {
-            "assets": enforce_assets(pd.DataFrame(raw.get("assets", defaults_assets()))),
-            "credit_cards": enforce_cards(pd.DataFrame(raw.get("credit_cards", defaults_cards()))),
-            "reimbursements": enforce_reim(pd.DataFrame(raw.get("reimbursements", defaults_reim()))),
-            "fixed_costs": normalize_fixed(pd.DataFrame(raw.get("fixed_costs", defaults_fixed()))),
-            "pay_cycle": enforce_pay(pd.DataFrame(raw.get("pay_cycle", defaults_pay()))),
-            "rac_bills": normalize_rac_bills(pd.DataFrame(raw.get("rac_bills", defaults_rac_bills()))),
-            "fx": {
-                "use_live": bool(raw.get("fx", {}).get("use_live", True)),
-                "manual_usd_gbp": float(raw.get("fx", {}).get("manual_usd_gbp", 0.80)),
-            },
-        }
-        return state
-    except Exception:
-        return None
-
-def save_state_to_supabase(state: dict) -> bool:
-    """
-    Upsert into public.app_state (id='stabler')
-    """
-    if not supabase_is_configured():
-        return False
-    try:
-        sb = get_supabase_client()
-        payload = {
-            "id": "stabler",
-            "schema_version": SCHEMA_VERSION,
-            "state_json": {
-                "assets": state["assets"].to_dict(orient="records"),
-                "credit_cards": state["credit_cards"].to_dict(orient="records"),
-                "reimbursements": state["reimbursements"].to_dict(orient="records"),
-                "fixed_costs": state["fixed_costs"].to_dict(orient="records"),
-                "pay_cycle": state["pay_cycle"].to_dict(orient="records"),
-                "rac_bills": state.get("rac_bills", defaults_rac_bills()).to_dict(orient="records"),
-                "fx": state.get("fx", {"use_live": True, "manual_usd_gbp": 0.80}),
-            },
-        }
-        sb.table("app_state").upsert(payload).execute()
-        return True
-    except Exception:
-        return False
 
 # ------------------------
 # Sidebar: Save / Load
