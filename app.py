@@ -491,7 +491,7 @@ def supabase_get_state(row_id: str = "stabler") -> dict | None:
 # ------------------------
 # TrueLayer + Supabase bank_connections (service role)
 # ------------------------
-TRUELAYER_AUTH_URL = "https://auth.truelayer.com/"
+TRUELAYER_AUTH_URL = "https://auth.truelayer.com/connect/authorize"
 TRUELAYER_TOKEN_URL = "https://auth.truelayer.com/connect/token"
 TRUELAYER_DATA_API = "https://api.truelayer.com/data/v1"
 
